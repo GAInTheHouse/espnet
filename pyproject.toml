@@ -102,10 +102,9 @@ asr2 = [
   "editdistance",
 ]
 
-# We didn't specify s3prl version as it should be installed via github.
 s2st = [
   "editdistance",
-  "s3prl",
+  "s3prl @ git+https://github.com/espnet/s3prl.git@572af70",
 ]
 
 st = [

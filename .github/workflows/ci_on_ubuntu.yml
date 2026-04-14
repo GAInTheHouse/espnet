@@ -39,7 +39,7 @@ jobs:
   #     max-parallel: 20
   #     matrix:
   #       python-version: ["3.10", "3.12"]
-  #       pytorch-version: [2.5.1, 2.7.1, 2.8.0, 2.9.1]
+  #       pytorch-version: [2.9.1, 2.10.0, 2.11.0]
   #       chainer-version: [6.0.0]
   #       use-conda: [false]
   #   steps:
@@ -73,7 +73,7 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10", "3.12"]
-        pytorch-version: [2.5.1, 2.7.1, 2.8.0, 2.9.1]
+        pytorch-version: [2.9.1, 2.10.0, 2.11.0]
         use-conda: [false]
         chainer-version: [6.0.0]
     steps:
@@ -110,7 +110,7 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10", "3.12"]
-        pytorch-version: [2.7.1]
+        pytorch-version: [2.9.1]
         use-conda: [false]
         chainer-version: [6.0.0]
     steps:
@@ -147,7 +147,7 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10"]
-        pytorch-version: [2.7.1]
+        pytorch-version: [2.9.1]
         use-conda: [false]
         chainer-version: [6.0.0]
     steps:
@@ -177,14 +177,10 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10", "3.12"]
-        pytorch-version: [2.5.1, 2.9.1]
+        pytorch-version: [2.9.1, 2.10.0, 2.11.0]
         use-conda: [false]
         chainer-version: [6.0.0]
         config-task: ["asr", "tts", "asr2",  "enh", "ssl", "st", "spk", "lid", "s2t", "s2st", "lm", "codec"]
-        exclude:
-            - python-version: "3.12"
-              pytorch-version: 2.5.1
-              use-conda: false
     steps:
       - uses: actions/checkout@master
       - uses: actions/cache@v5
@@ -218,7 +214,7 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10"]
-        pytorch-version: ["2.7.1"]
+        pytorch-version: ["2.9.1"]
         config-task: ["asr", "asr_transducer", "lm", "ssl", "tts", "enh",  "enh_asr"]
         use-conda: [false]
         chainer-version: [6.0.0]
@@ -251,7 +247,7 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10", "3.12"]
-        pytorch-version: [2.5.1, 2.7.1, 2.8.0, 2.9.1]
+        pytorch-version: [2.9.1, 2.10.0, 2.11.0]
         chainer-version: [6.0.0]
         use-conda: [false]
     steps:
@@ -288,7 +284,7 @@ jobs:
       max-parallel: 20
       matrix:
         python-version: ["3.10"]
-        pytorch-version: [2.7.1]
+        pytorch-version: [2.9.1]
     steps:
     - uses: actions/checkout@master
     - name: Set up Python
