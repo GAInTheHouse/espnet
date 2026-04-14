@@ -1,0 +1,10 @@
+# conf/decode_asr.yaml
+# Decoding configuration for AfriSpeech RL experiment.
+
+beam_size: 10
+ctc_weight: 0.3
+lm_weight: 0.0          # no external LM by default
+penalty: 0.0
+maxlenratio: 0.0
+minlenratio: 0.0
+nbest: 1

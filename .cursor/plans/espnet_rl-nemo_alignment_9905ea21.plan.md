@@ -4,40 +4,40 @@ overview: Align the ESPnet2 RL extension with the NeMo reward-augmented fine-tun
 todos:
   - id: gcp-setup
     content: Write gcp_scripts/setup_gcp_vm.sh — CUDA/audio system deps, ESPnet source install, Python RL deps
-    status: pending
+    status: completed
   - id: data-prep-python
     content: Write egs2/afrispeech_rl/asr1/local/data_hf.py — HuggingFace download + kaldi-format conversion for AfriSpeech-200 clinical, VoxPopuli EN, LibriSpeech dev-clean
-    status: pending
+    status: completed
   - id: data-prep-shell
     content: Write egs2/afrispeech_rl/asr1/local/data.sh — calls data_hf.py, validates kaldi dirs
-    status: pending
+    status: completed
   - id: recipe-skeleton
     content: Write egs2/afrispeech_rl/asr1/{run.sh, db.sh, path.sh, cmd.sh} — recipe skeleton
-    status: pending
+    status: completed
   - id: recipe-configs
     content: Write conf/train_asr_sft.yaml (stage-1) and conf/train_asr_rl.yaml (stage-2) and conf/decode_asr.yaml
-    status: pending
+    status: completed
   - id: rl-model-reward-modes
     content: Add reward_mode, reward_loss_type, wwer, llm/Gemini+mock, domain terms, caching to rl_espnet_model.py
-    status: pending
+    status: completed
   - id: rl-model-forward
     content: "Update forward(): compute_reward flag + reward dispatch + loss formula selection + torch.no_grad() guard for penalty mode + FP32 cast for REINFORCE seq_log_probs"
-    status: pending
+    status: completed
   - id: rl-trainer-options
     content: Add all new options to RLTrainerOptions and add_arguments() in rl_trainer.py
-    status: pending
+    status: completed
   - id: rl-trainer-injection
     content: Update train_one_epoch() to inject compute_reward, reward_mode, reward_loss_type and other new options into batch dict
-    status: pending
+    status: completed
   - id: requirements
     content: Write requirements_rl.txt with pinned RL-specific Python deps
-    status: pending
+    status: completed
   - id: gcp-run-script
     content: Write gcp_scripts/run_espnet_rl_experiment.sh — end-to-end GCP orchestration (env check, data, SFT, RL, eval)
-    status: pending
+    status: completed
   - id: lora-integration
     content: Add --use_lora flag to run.sh, LoRA adapter_conf block to SFT and RL YAMLs, loralib to requirements_rl.txt
-    status: pending
+    status: completed
 isProject: false
 ---
 

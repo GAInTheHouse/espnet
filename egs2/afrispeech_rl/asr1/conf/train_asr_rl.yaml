@@ -1,0 +1,113 @@
+# conf/train_asr_rl.yaml
+# Stage 2: Reward-augmented fine-tuning (RL stage), continuing from SFT checkpoint.
+#
+# Mirrors NeMo Stage 2 from docs/FT Pipeline Methodology.docx:
+#   Loss         : CTC/attention + reward penalty  (penalty mode, default)
+#                  OR REINFORCE PG loss             (reinforce mode, via --reward_loss_type)
+#   Reward       : total_loss = ce_loss + rl_weight * (1 - mean(reward))  [penalty]
+#                  OR (1-w)*ce + w*(-reward*log_prob)                      [reinforce]
+#   rl_weight    : 0.05  (NeMo REWARD_WEIGHT=0.05)
+#   Optimizer    : AdamW, lr=1e-5  (NeMo LEARNING_RATE_RL=1e-5, 10x smaller than SFT)
+#   Epochs       : 3  (NeMo RL_EPOCHS=3)
+#   Reward mode  : mwer (default); override via --reward_mode wwer|llm|all
+#   Step interval: 4  (NeMo REWARD_STEP_INTERVAL=4)
+
+# --- Architecture (same as SFT) ---
+encoder: conformer
+encoder_conf:
+    output_size: 256
+    attention_heads: 4
+    linear_units: 2048
+    num_blocks: 12
+    dropout_rate: 0.1
+    positional_dropout_rate: 0.1
+    attention_dropout_rate: 0.1
+    input_layer: conv2d
+    normalize_before: true
+    macaron_style: true
+    pos_enc_layer_type: rel_pos
+    selfattention_layer_type: rel_selfattn
+    activation_type: swish
+    use_cnn_module: true
+    cnn_module_kernel: 31
+
+decoder: transformer
+decoder_conf:
+    attention_heads: 4
+    linear_units: 2048
+    num_blocks: 6
+    dropout_rate: 0.1
+    positional_dropout_rate: 0.1
+    self_attention_dropout_rate: 0.1
+    src_attention_dropout_rate: 0.1
+
+# --- Model config ---
+model_conf:
+    ctc_weight: 0.3
+    lsm_weight: 0.1
+    length_normalized_loss: false
+
+# --- SpecAugment ---
+specaug: specaug
+specaug_conf:
+    apply_time_warp: true
+    time_warp_window: 5
+    apply_time_mask: true
+    time_mask_width_ratio_range:
+    - 0.0
+    - 0.05
+    num_time_mask: 5
+    apply_freq_mask: true
+    freq_mask_width_range:
+    - 0
+    - 30
+    num_freq_mask: 2
+
+# --- Optimizer (AdamW, lr=1e-5 — NeMo LEARNING_RATE_RL=1e-5) ---
+optim: adamw
+optim_conf:
+    lr: 1.0e-5                # 10x smaller than SFT (NeMo pattern)
+    betas:
+    - 0.9
+    - 0.98
+    weight_decay: 1.0e-3
+    eps: 1.0e-8
+
+# --- Scheduler ---
+scheduler: warmuplr
+scheduler_conf:
+    warmup_steps: 500         # shorter warmup for RL fine-tuning
+
+# --- Training ---
+max_epoch: 3                  # NeMo RL_EPOCHS=3
+batch_type: numel
+batch_bins: 4000000
+accum_grad: 2
+grad_clip: 5.0
+use_amp: true
+num_workers: 4
+
+# --- RL config (NeMo-aligned defaults) ---
+rl_weight: 0.05               # NeMo REWARD_WEIGHT=0.05
+reward_mode: mwer             # mwer | wwer | llm | all  (override via --reward_mode)
+reward_loss_type: penalty     # penalty (NeMo default) | reinforce
+reward_step_interval: 4       # NeMo REWARD_STEP_INTERVAL=4
+max_encoder_len_for_reward: 1500  # skip reward for long utterances (GPU guard)
+domain_term_weight: 3.0       # cost multiplier for domain terms in wwer mode
+domain_terms: []              # clinical vocabulary; set in run.sh --domain_terms
+gemini_api_key: ""            # set via --gemini_api_key or GEMINI_API_KEY env var
+mock_llm: false               # use mock LLM (mwer+noise) instead of live Gemini
+
+# --- LoRA (disabled by default; activated via run.sh --use_lora true) ---
+use_adapter: false
+adapter: lora
+adapter_conf:
+    rank: 8
+    alpha: 16
+    target_modules:
+    - linear_q
+    - linear_k
+    - linear_v
+    - linear_out
+    - w_1
+    - w_2

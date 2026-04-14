@@ -1,35 +1,46 @@
-"""REINFORCE policy-gradient trainer extending ESPnet2's base Trainer.
+"""REINFORCE / reward-augmented fine-tuning trainer extending ESPnet2's Trainer.
 
 Design overview
 ---------------
-The standard ESPnet2 Trainer computes a supervised cross-entropy (CE) loss
-inside the model's forward() and then calls backward().  RLTrainer introduces
-a second signal — a WER-based REINFORCE reward — and blends it with the CE
-loss before the backward pass:
+``RLTrainer`` overrides ``train_one_epoch()`` to inject RL configuration into
+each batch dict before the model forward call.  ``RLESPnetModel`` reads these
+keys from its ``forward(**kwargs)`` signature and computes the blended loss
+internally, keeping DDP all-reduce semantics intact.
+
+Two loss formulae are supported (selected via ``--reward_loss_type``):
+
+penalty (NeMo-aligned, default for the AfriSpeech RL experiment)::
+
+    total_loss = ce_loss + rl_weight * (1 - mean(reward))
+
+reinforce (true REINFORCE policy gradient)::
 
     total_loss = (1 - rl_weight) * ce_loss + rl_weight * pg_loss
+    pg_loss    = -mean(reward * seq_log_prob.float())
 
-    pg_loss = -E[reward * log_prob_of_greedy_hypothesis]
+Reward modes (``--reward_mode``):
+    mwer    WER-based reward via jiwer (default)
+    wwer    Domain-weighted WER (uses --domain_terms / --domain_term_weight)
+    llm     Gemini-1.5-flash quality score; mock fallback = mwer + N(0,0.05)
+    all     Element-wise mean of mwer, wwer, and llm
 
-The injection happens by augmenting each batch dict with an ``rl_weight``
-key before calling the model.  ``RLESPnetModel`` reads this key from
-``**kwargs`` in its ``forward()`` and runs both CE and RL branches,
-returning the blended loss in the standard (loss, stats, weight) tuple.
-This design keeps DDP gradient synchronisation intact: every parameter
-update flows through the same single DDP-wrapped forward call.
+GPU efficiency improvements vs. the original single-mode trainer:
+    1. ``compute_reward = (iiter % reward_step_interval == 0)`` — reward is
+       computed only every N steps; the model reuses a cached neutral value
+       on skip steps, matching NeMo's REWARD_STEP_INTERVAL=4.
+    2. In ``penalty`` mode, ``RLESPnetModel`` wraps the greedy decode in
+       ``torch.no_grad()`` so no CTC activation graph is retained.
+    3. In ``reinforce`` mode, ``seq_log_probs.float()`` prevents FP16 underflow
+       for long utterances under AMP.
 
 Usage
 -----
-In your ASR task class, replace::
-
-    trainer = Trainer
-
-with::
+In your ASR task class, set::
 
     trainer = RLTrainer
 
-and use ``RLESPnetModel`` (from ``espnet2.asr.rl_espnet_model``) as the
-model class.
+and use ``RLESPnetModel`` (espnet2.asr.rl_espnet_model) as the model class,
+or run via ``espnet2.bin.asr_train_rl`` (uses ``RLASRTask``).
 """
 
 import argparse
@@ -37,7 +48,7 @@ import dataclasses
 import logging
 import time
 from contextlib import contextmanager
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn
@@ -102,9 +113,40 @@ if torch.distributed.is_available():
 
 @dataclasses.dataclass
 class RLTrainerOptions(TrainerOptions):
-    """TrainerOptions extended with RL-specific hyper-parameters."""
+    """TrainerOptions extended with RL / reward-augmented fine-tuning parameters.
+
+    All fields map 1-to-1 to CLI arguments registered in
+    ``RLTrainer.add_arguments()``.
+    """
 
     rl_weight: float = 0.1
+    """Blend weight for the RL loss term.  0.0 = pure CE (SFT stage)."""
+
+    reward_mode: str = "mwer"
+    """Reward function: ``mwer`` | ``wwer`` | ``llm`` | ``all``."""
+
+    reward_loss_type: str = "reinforce"
+    """Loss formula: ``reinforce`` (REINFORCE PG) | ``penalty`` (NeMo-style)."""
+
+    reward_step_interval: int = 4
+    """Compute reward every N optimizer steps; reuse cached value otherwise.
+    Matches NeMo REWARD_STEP_INTERVAL=4."""
+
+    max_encoder_len_for_reward: int = 1500
+    """Skip reward computation for utterances whose encoder output exceeds
+    this frame count (GPU memory guard).  Reuses cached reward."""
+
+    domain_terms: List[str] = dataclasses.field(default_factory=list)
+    """Vocabulary list for ``wwer`` domain weighting."""
+
+    domain_term_weight: float = 3.0
+    """Edit-cost multiplier for domain terms in ``wwer`` mode."""
+
+    gemini_api_key: str = ""
+    """Gemini API key for ``llm`` reward mode.  Falls back to mock if empty."""
+
+    mock_llm: bool = False
+    """Use mock LLM (mwer + Gaussian noise) even if ``gemini_api_key`` is set."""
 
 
 # ---------------------------------------------------------------------------
@@ -113,13 +155,12 @@ class RLTrainerOptions(TrainerOptions):
 
 
 class RLTrainer(Trainer):
-    """REINFORCE policy-gradient trainer for ESPnet2 ASR models.
+    """Reward-augmented fine-tuning trainer for ESPnet2 ASR models.
 
-    Inherits from ``Trainer`` and overrides ``train_one_epoch`` to blend a
-    WER-based REINFORCE signal with the supervised CE loss.
-
-    The RL weight is passed to the model through the batch dict so that
-    DDP gradient synchronisation is preserved across all ranks.
+    Inherits from ``Trainer`` and overrides ``train_one_epoch`` to inject RL
+    configuration into each batch dict before the model forward call.  The
+    model (``RLESPnetModel``) picks up these keys and computes the blended
+    loss internally, keeping DDP all-reduce semantics intact.
     """
 
     @classmethod
@@ -136,61 +177,83 @@ class RLTrainer(Trainer):
             type=float,
             default=0.1,
             help=(
-                "Mixing weight for the REINFORCE policy-gradient loss. "
-                "total_loss = (1 - rl_weight) * ce_loss + rl_weight * pg_loss. "
-                "Set to 0.0 to fall back to purely supervised training."
+                "Blend weight for the RL loss. "
+                "penalty mode: total = ce + w*(1-mean_reward). "
+                "reinforce mode: total = (1-w)*ce + w*pg_loss. "
+                "Set to 0.0 to run pure supervised training (SFT stage)."
             ),
         )
-
-    # ------------------------------------------------------------------
-    # Reward computation
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def compute_reward(
-        cls,
-        hypotheses: List[str],
-        references: List[str],
-        device: torch.device,
-    ) -> torch.Tensor:
-        """Compute per-utterance WER-based REINFORCE reward.
-
-        reward_i = clip(1 - WER(reference_i, hypothesis_i), 0, 1)
-
-        A perfect hypothesis yields reward 1.0; a hypothesis whose WER
-        exceeds 100 % (insertions can push WER > 1) is clipped to 0.0.
-
-        Args:
-            hypotheses: Decoded hypothesis strings, one per utterance.
-            references:  Ground-truth transcript strings, one per utterance.
-            device:      Device for the returned tensor.
-
-        Returns:
-            Tensor of shape (B,) with values in [0, 1].
-
-        Raises:
-            RuntimeError: When ``jiwer`` is not installed.
-        """
-        if not _HAS_JIWER:
-            raise RuntimeError(
-                "jiwer is required for WER-based rewards. "
-                "Install with: pip install jiwer"
-            )
-
-        rewards: List[float] = []
-        for hyp, ref in zip(hypotheses, references):
-            if not ref.strip():
-                # Empty reference — reward is undefined; treat as 0.
-                rewards.append(0.0)
-                continue
-            try:
-                wer_score = _jiwer.wer(ref, hyp if hyp.strip() else "<empty>")
-            except Exception as exc:
-                logging.warning(f"jiwer.wer() failed ({exc}); defaulting reward to 0.")
-                wer_score = 1.0
-            rewards.append(max(0.0, 1.0 - wer_score))
-
-        return torch.tensor(rewards, dtype=torch.float32, device=device)
+        group.add_argument(
+            "--reward_mode",
+            type=str,
+            default="mwer",
+            choices=["mwer", "wwer", "llm", "all"],
+            help=(
+                "Reward function to use: "
+                "mwer=WER-based, wwer=domain-weighted WER, "
+                "llm=Gemini quality score, all=average of all three."
+            ),
+        )
+        group.add_argument(
+            "--reward_loss_type",
+            type=str,
+            default="reinforce",
+            choices=["reinforce", "penalty"],
+            help=(
+                "Loss formula: 'reinforce' = true REINFORCE PG loss; "
+                "'penalty' = NeMo-style auxiliary penalty (no policy gradient)."
+            ),
+        )
+        group.add_argument(
+            "--reward_step_interval",
+            type=int,
+            default=4,
+            help=(
+                "Compute reward every N optimizer steps. "
+                "Cached neutral reward (0.5) is reused on skip steps. "
+                "Matches NeMo REWARD_STEP_INTERVAL=4."
+            ),
+        )
+        group.add_argument(
+            "--max_encoder_len_for_reward",
+            type=int,
+            default=1500,
+            help=(
+                "Skip reward computation when encoder output exceeds this "
+                "frame count (long-utterance GPU memory guard)."
+            ),
+        )
+        group.add_argument(
+            "--domain_terms",
+            nargs="*",
+            default=[],
+            metavar="TERM",
+            help=(
+                "Domain vocabulary for wwer reward weighting. "
+                "Example: --domain_terms hypertension arrhythmia tachycardia"
+            ),
+        )
+        group.add_argument(
+            "--domain_term_weight",
+            type=float,
+            default=3.0,
+            help="Edit-cost multiplier for domain terms in wwer mode (default 3.0).",
+        )
+        group.add_argument(
+            "--gemini_api_key",
+            type=str,
+            default="",
+            help=(
+                "Google Gemini API key for llm reward mode. "
+                "If empty, mock fallback (mwer + Gaussian noise) is used."
+            ),
+        )
+        group.add_argument(
+            "--mock_llm",
+            default=False,
+            action="store_true",
+            help="Force mock LLM path even when --gemini_api_key is provided.",
+        )
 
     # ------------------------------------------------------------------
     # Training loop
@@ -210,17 +273,11 @@ class RLTrainer(Trainer):
         options: RLTrainerOptions,
         distributed_option: DistributedOption,
     ) -> bool:
-        """Run one epoch of REINFORCE-blended ASR training.
+        """Run one epoch of reward-augmented ASR training.
 
-        This method mirrors the structure of ``Trainer.train_one_epoch``
-        exactly, with a single augmentation: ``rl_weight`` is injected into
-        each batch dict before the model forward call.  The model
-        (``RLESPnetModel``) picks up this key and computes both CE and PG
-        losses internally, keeping DDP all-reduce semantics intact.
-
-        The additional stats emitted by the model (``reward``, ``pg_loss``,
-        ``ce_loss``) are transparently forwarded through ESPnet2's existing
-        Reporter infrastructure.
+        Mirrors ``Trainer.train_one_epoch`` exactly, with RL config injected
+        into each batch dict before the model call.  ``RLESPnetModel`` reads
+        these keys and computes the blended loss, keeping DDP semantics intact.
         """
         grad_noise = options.grad_noise
         accum_grad = options.accum_grad
@@ -231,7 +288,17 @@ class RLTrainer(Trainer):
         ngpu = options.ngpu
         use_wandb = options.use_wandb
         distributed = distributed_option.distributed
-        rl_weight = getattr(options, "rl_weight", 0.1)
+
+        # RL options
+        rl_weight = options.rl_weight
+        reward_mode = options.reward_mode
+        reward_loss_type = options.reward_loss_type
+        reward_step_interval = options.reward_step_interval
+        max_encoder_len_for_reward = options.max_encoder_len_for_reward
+        domain_terms = options.domain_terms or []
+        domain_term_weight = options.domain_term_weight
+        gemini_api_key = options.gemini_api_key or ""
+        mock_llm = options.mock_llm
 
         if log_interval is None:
             try:
@@ -242,7 +309,6 @@ class RLTrainer(Trainer):
         model.train()
         all_steps_are_invalid = True
 
-        # Distributed early-stop flag (same as base Trainer).
         iterator_stop = torch.tensor(0).to("cuda" if ngpu > 0 else "cpu")
 
         start_time = time.perf_counter()
@@ -258,11 +324,20 @@ class RLTrainer(Trainer):
 
             batch["utt_id"] = utt_id
 
-            # -------------------------------------------------------
-            # [RL INJECTION] Pass rl_weight through the batch dict so
-            # the model can blend CE and PG losses in forward().
-            # -------------------------------------------------------
+            # -----------------------------------------------------------
+            # [RL INJECTION] Augment batch dict with all RL config.
+            # RLESPnetModel reads these from its forward() signature.
+            # Non-tensor values pass through to_device() unchanged.
+            # -----------------------------------------------------------
             batch["rl_weight"] = rl_weight
+            batch["compute_reward"] = (iiter % reward_step_interval == 0)
+            batch["reward_mode"] = reward_mode
+            batch["reward_loss_type"] = reward_loss_type
+            batch["max_encoder_len_for_reward"] = max_encoder_len_for_reward
+            batch["domain_terms"] = domain_terms
+            batch["domain_term_weight"] = domain_term_weight
+            batch["gemini_api_key"] = gemini_api_key
+            batch["mock_llm"] = mock_llm
 
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
             if no_forward_run:
@@ -273,9 +348,6 @@ class RLTrainer(Trainer):
                 with reporter.measure_time("forward_time"):
                     retval = model(**batch)
 
-                    # Standard ESPnet2 return-value contract:
-                    #   dict with keys 'loss', 'stats', 'weight', optionally 'optim_idx'
-                    #   -OR- a plain (loss, stats, weight) tuple.
                     if isinstance(retval, dict):
                         loss = retval["loss"]
                         stats = retval["stats"]
@@ -283,10 +355,11 @@ class RLTrainer(Trainer):
                         optim_idx = retval.get("optim_idx")
                         if optim_idx is not None and not isinstance(optim_idx, int):
                             if isinstance(optim_idx, torch.Tensor):
-                                if optim_idx.dim() == 1:
-                                    optim_idx = optim_idx[0].item()
-                                else:
-                                    optim_idx = optim_idx.item()
+                                optim_idx = (
+                                    optim_idx[0].item()
+                                    if optim_idx.dim() == 1
+                                    else optim_idx.item()
+                                )
                             else:
                                 raise RuntimeError(
                                     f"optim_idx must be int or 1-d Tensor, "
@@ -343,7 +416,7 @@ class RLTrainer(Trainer):
 
                 if not torch.isfinite(grad_norm):
                     logging.warning(
-                        f"[RLTrainer] grad_norm is {grad_norm}; skipping update."
+                        "[RLTrainer] grad_norm is %s; skipping update.", grad_norm
                     )
                     if scaler is not None:
                         for iopt, optimizer in enumerate(optimizers):
