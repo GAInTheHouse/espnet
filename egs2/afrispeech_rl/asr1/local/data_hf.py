@@ -75,6 +75,23 @@ def _save_wav(audio_array, sampling_rate: int, out_path: pathlib.Path) -> None:
     sf.write(str(out_path), arr, 16000, subtype="PCM_16")
 
 
+def _duration_ok(
+    audio_array,
+    sampling_rate: int,
+    min_duration: float,
+    max_duration: float,
+) -> bool:
+    """Return True if audio duration is within [min_duration, max_duration] seconds.
+
+    Mirrors NeMo data loader's min_duration=0.5 / max_duration=20.0 filter.
+    """
+    import numpy as np
+
+    n_samples = len(np.asarray(audio_array))
+    duration = n_samples / max(sampling_rate, 1)
+    return min_duration <= duration <= max_duration
+
+
 # ---------------------------------------------------------------------------
 # Dataset-specific iterators  →  yield (utt_id, spk_id, wav_path, text)
 # ---------------------------------------------------------------------------
@@ -85,8 +102,13 @@ def _iter_afrispeech(
     audio_dir: pathlib.Path,
     max_samples: int,
     seed: int,
+    min_duration: float = 0.5,
+    max_duration: float = 20.0,
 ) -> Iterator[Tuple[str, str, pathlib.Path, str]]:
-    """Iterate AfriSpeech-200, filtered to domain=='clinical'."""
+    """Iterate AfriSpeech-200, filtered to domain=='clinical'.
+
+    Applies duration filter: 0.5s ≤ duration ≤ 20.0s (NeMo defaults).
+    """
     import datasets as hf_datasets
 
     log.info("Loading tobiolatunji/afrispeech-200 split=%s ...", split)
@@ -106,8 +128,14 @@ def _iter_afrispeech(
         indices = rng.sample(indices, max_samples)
         log.info("  Subsampled to %d utterances (seed=%d)", max_samples, seed)
 
+    skipped = 0
     for idx in indices:
         ex = ds[idx]
+        audio = ex["audio"]
+        if not _duration_ok(audio["array"], audio["sampling_rate"], min_duration, max_duration):
+            skipped += 1
+            continue
+
         spk = str(ex.get("accent", ex.get("speaker_id", f"spk{idx:06d}"))).replace(
             " ", "_"
         )
@@ -115,11 +143,13 @@ def _iter_afrispeech(
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
-            audio = ex["audio"]
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
         transcript = str(ex.get("transcript", ex.get("text", ""))).strip().upper()
         yield utt_id, spk, wav_path.resolve(), transcript
+
+    if skipped:
+        log.info("  Duration filter skipped %d utterances (outside %.1fs–%.1fs)", skipped, min_duration, max_duration)
 
 
 def _iter_voxpopuli(
@@ -127,8 +157,10 @@ def _iter_voxpopuli(
     audio_dir: pathlib.Path,
     max_samples: int,
     seed: int,
+    min_duration: float = 0.5,
+    max_duration: float = 20.0,
 ) -> Iterator[Tuple[str, str, pathlib.Path, str]]:
-    """Iterate VoxPopuli EN.  Uses streaming to avoid full-dataset download."""
+    """Iterate VoxPopuli EN.  Applies duration filter (NeMo: 0.5s–20.0s)."""
     import datasets as hf_datasets
 
     log.info("Loading facebook/voxpopuli (en) split=%s ...", split)
@@ -146,14 +178,19 @@ def _iter_voxpopuli(
         indices = rng.sample(indices, max_samples)
         log.info("  Subsampled to %d utterances (seed=%d)", max_samples, seed)
 
+    skipped = 0
     for rank, idx in enumerate(indices):
         ex = ds[idx]
+        audio = ex["audio"]
+        if not _duration_ok(audio["array"], audio["sampling_rate"], min_duration, max_duration):
+            skipped += 1
+            continue
+
         spk = str(ex.get("speaker_id", f"spk{idx:06d}"))
         utt_id = f"voxpopuli_{split}_{rank:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
-            audio = ex["audio"]
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
         transcript = str(
@@ -161,14 +198,22 @@ def _iter_voxpopuli(
         ).strip().upper()
         yield utt_id, spk, wav_path.resolve(), transcript
 
+    if skipped:
+        log.info("  Duration filter skipped %d utterances (outside %.1fs–%.1fs)", skipped, min_duration, max_duration)
+
 
 def _iter_librispeech(
     split: str,
     audio_dir: pathlib.Path,
     max_samples: int,
     seed: int,
+    min_duration: float = 0.5,
+    max_duration: float = 20.0,
 ) -> Iterator[Tuple[str, str, pathlib.Path, str]]:
-    """Iterate LibriSpeech via HuggingFace openslr/librispeech_asr."""
+    """Iterate LibriSpeech via HuggingFace openslr/librispeech_asr.
+
+    Applies duration filter (NeMo: 0.5s–20.0s).
+    """
     import datasets as hf_datasets
 
     log.info("Loading openslr/librispeech_asr split=%s ...", split)
@@ -185,19 +230,27 @@ def _iter_librispeech(
         indices = rng.sample(indices, max_samples)
         log.info("  Subsampled to %d utterances (seed=%d)", max_samples, seed)
 
+    skipped = 0
     for idx in indices:
         ex = ds[idx]
+        audio = ex["audio"]
+        if not _duration_ok(audio["array"], audio["sampling_rate"], min_duration, max_duration):
+            skipped += 1
+            continue
+
         spk = str(ex.get("speaker_id", f"spk{idx:06d}"))
         chapter = str(ex.get("chapter_id", "0"))
         utt_id = f"{spk}-{chapter}-{idx:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
-            audio = ex["audio"]
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
         transcript = str(ex.get("text", "")).strip().upper()
         yield utt_id, spk, wav_path.resolve(), transcript
+
+    if skipped:
+        log.info("  Duration filter skipped %d utterances (outside %.1fs–%.1fs)", skipped, min_duration, max_duration)
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +343,20 @@ def get_parser() -> argparse.ArgumentParser:
         default=42,
         help="Random seed for subsampling.",
     )
+    p.add_argument(
+        "--min_duration",
+        type=float,
+        default=0.5,
+        help="Minimum audio duration in seconds (default 0.5). "
+        "Mirrors NeMo data loader min_duration=0.5.",
+    )
+    p.add_argument(
+        "--max_duration",
+        type=float,
+        default=20.0,
+        help="Maximum audio duration in seconds (default 20.0). "
+        "Mirrors NeMo data loader max_duration=20.0.",
+    )
     return p
 
 
@@ -299,12 +366,14 @@ def main(argv=None) -> None:
     audio_dir: pathlib.Path = args.audio_dir.resolve()
     audio_dir.mkdir(parents=True, exist_ok=True)
 
+    dur_kwargs = dict(min_duration=args.min_duration, max_duration=args.max_duration)
+
     if args.dataset == "afrispeech":
-        it = _iter_afrispeech(args.split, audio_dir, args.max_samples, args.seed)
+        it = _iter_afrispeech(args.split, audio_dir, args.max_samples, args.seed, **dur_kwargs)
     elif args.dataset == "voxpopuli":
-        it = _iter_voxpopuli(args.split, audio_dir, args.max_samples, args.seed)
+        it = _iter_voxpopuli(args.split, audio_dir, args.max_samples, args.seed, **dur_kwargs)
     elif args.dataset == "librispeech":
-        it = _iter_librispeech(args.split, audio_dir, args.max_samples, args.seed)
+        it = _iter_librispeech(args.split, audio_dir, args.max_samples, args.seed, **dur_kwargs)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 

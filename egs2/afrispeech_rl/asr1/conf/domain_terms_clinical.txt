@@ -1,0 +1,40 @@
+# Clinical domain vocabulary — 37 tokens used for wwer reward and EWER evaluation.
+# Sourced from NeMo run config (afrispeech_clinical_seed42_1776207077).
+# One term per line; eval_extended.py and data_hf.py read this file.
+patient
+hypertension
+malaria
+diabetes
+medication
+surgery
+diagnosis
+treatment
+hospital
+clinic
+prescription
+infection
+antibiotic
+dosage
+symptom
+fever
+blood
+pressure
+chronic
+acute
+cardiac
+respiratory
+pulmonary
+anemia
+tuberculosis
+hiv
+antiretroviral
+pregnancy
+prenatal
+neonatal
+cholesterol
+kidney
+liver
+cancer
+arthritis
+asthma
+epilepsy

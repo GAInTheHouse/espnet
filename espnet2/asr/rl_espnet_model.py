@@ -25,6 +25,17 @@ reinforce (REINFORCE policy gradient, ``reward_loss_type="reinforce"``)::
     pg_loss    = -mean(reward * seq_log_prob.float())   # FP32 cast: AMP safety
     total_loss = (1 - rl_weight) * ce_loss + rl_weight * pg_loss
 
+reweight_ctc (NeMo actual run objective, ``reward_loss_type="reweight_ctc"``)::
+
+    penalty_i          = 1 - reward_i          # per-utterance (high WER → high weight)
+    reweighted_ctc     = mean_i[penalty_i * ctc_loss_per_utt_i]   # reduction='none'
+    total_loss         = reweighted_ctc + (1 - ctc_weight) * loss_att
+
+    This is the objective used in the actual NeMo run (reward_weight=0.02, wwer mode).
+    Unlike ``penalty`` which adds a scalar correction term, ``reweight_ctc`` selectively
+    back-propagates harder through high-WER utterances.  Unlike ``reinforce`` it does not
+    require log-prob gradients.  Greedy decode still runs under ``torch.no_grad()``.
+
 Reward modes (``reward_mode``)
 ------------------------------
 mwer   Standard WER-based reward:  reward = clip(1 - WER(ref, hyp), 0, 1).
@@ -34,9 +45,11 @@ all    Element-wise mean of mwer, wwer, and llm reward tensors.
 
 GPU notes
 ---------
-- ``penalty`` mode: greedy decode runs under ``torch.no_grad()`` because
-  ``seq_log_probs`` are never used in the loss, preventing unnecessary
-  activation retention for the ``(B, T, V)`` CTC graph.
+- ``penalty`` / ``reweight_ctc`` modes: greedy decode runs under
+  ``torch.no_grad()`` because ``seq_log_probs`` are never used in the loss,
+  preventing unnecessary activation retention for the ``(B, T, V)`` CTC graph.
+  For ``reweight_ctc``, the per-utterance CTC loss is then recomputed
+  separately with gradients via ``F.ctc_loss(reduction='none')``.
 - ``reinforce`` mode: ``seq_log_probs.float()`` casts to FP32 before the PG
   loss to prevent underflow when running under AMP (FP16 has ~1-bit precision
   for sums of ~900 log-prob units, causing silent NaN gradients).
@@ -278,6 +291,7 @@ class RLESPnetModel(ESPnetASRModel):
         domain_term_weight: Optional[float] = None,
         gemini_api_key: Optional[str] = None,
         mock_llm: Optional[bool] = None,
+        log_reward_samples: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """Encode speech and compute CE + (optionally) reward-augmented loss.
@@ -300,6 +314,9 @@ class RLESPnetModel(ESPnetASRModel):
             domain_term_weight:       Override instance domain term weight.
             gemini_api_key:           Override instance API key.
             mock_llm:                 Override instance mock flag.
+            log_reward_samples:       If True, log up to 10 (utt_id, ref, hyp,
+                                      reward) sample tuples at INFO level.
+                                      Injected by RLTrainer on dump steps.
             **kwargs:                 Forwarded to parent (utt_id, etc.).
 
         Returns:
@@ -373,6 +390,7 @@ class RLESPnetModel(ESPnetASRModel):
             try:
                 total_loss = self._compute_rl_loss(
                     ce_loss=ce_loss,
+                    loss_att=loss_att,
                     encoder_out=encoder_out,
                     encoder_out_lens=encoder_out_lens,
                     text=text,
@@ -386,6 +404,8 @@ class RLESPnetModel(ESPnetASRModel):
                     d_weight=d_weight,
                     api_key=api_key,
                     use_mock=use_mock,
+                    log_reward_samples=log_reward_samples,
+                    utt_ids=kwargs.get("utt_id", []),
                     stats=stats,
                 )
             except Exception as exc:
@@ -451,6 +471,7 @@ class RLESPnetModel(ESPnetASRModel):
     def _compute_rl_loss(
         self,
         ce_loss: torch.Tensor,
+        loss_att: Optional[torch.Tensor],
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         text: torch.Tensor,
@@ -465,18 +486,25 @@ class RLESPnetModel(ESPnetASRModel):
         api_key: str,
         use_mock: bool,
         stats: dict,
+        log_reward_samples: bool = False,
+        utt_ids: Optional[List[str]] = None,
     ) -> torch.Tensor:
-        """Compute blended CE + RL loss and populate ``stats``."""
+        """Compute blended CE + RL loss and populate ``stats``.
+
+        Args:
+            loss_att: Attention-decoder loss (batch mean); used by
+                ``reweight_ctc`` mode which bypasses the blended ``ce_loss``
+                and recomputes the CTC component per-utterance.
+        """
         device = encoder_out.device
         batch_size = encoder_out.size(0)
 
-        # --- GPU fix 1: no_grad for penalty mode ---
-        # penalty mode never uses seq_log_probs in the loss;
-        # avoiding autograd here saves the full (B, T, V) activation graph.
+        # --- Greedy decode for reward (no_grad for penalty and reweight_ctc) ---
+        # Both penalty and reweight_ctc never use seq_log_probs in the loss, so
+        # we avoid retaining the full (B, T, V) CTC activation graph.
+        _decode_no_grad = reward_loss_type in ("penalty", "reweight_ctc")
         _decode_ctx = (
-            torch.no_grad()
-            if reward_loss_type == "penalty"
-            else contextlib.nullcontext()
+            torch.no_grad() if _decode_no_grad else contextlib.nullcontext()
         )
         with _decode_ctx:
             ctc_log_probs = self.ctc.log_softmax(encoder_out)
@@ -503,14 +531,59 @@ class RLESPnetModel(ESPnetASRModel):
             )
             self._cached_reward = rewards.mean().detach().unsqueeze(0)
 
+            # --- Diagnostic sample dump (NeMo reward_sample_dump_interval) ---
+            if log_reward_samples:
+                n_show = min(10, len(hypotheses))
+                ids = (
+                    list(utt_ids)[:n_show]
+                    if utt_ids
+                    else [f"batch[{i}]" for i in range(n_show)]
+                )
+                for i in range(n_show):
+                    logging.info(
+                        "[RL reward sample] utt=%s  reward=%.4f  "
+                        "ref=%r  hyp=%r",
+                        ids[i],
+                        rewards[i].item(),
+                        references[i][:80],
+                        hypotheses[i][:80],
+                    )
+
         stats["reward_mean"] = rewards.mean().detach()
+        stats["reward_std"] = rewards.std().detach()
 
         # --- Loss formula ---
         if reward_loss_type == "penalty":
-            # NeMo-style: reward is an auxiliary signal; no policy gradient
+            # NeMo-style auxiliary penalty: scalar correction, no PG
             penalty = 1.0 - rewards.mean()
             total_loss = ce_loss + rl_weight * penalty
             stats["penalty"] = penalty.detach()
+
+        elif reward_loss_type == "reweight_ctc":
+            # Per-utterance CTC reweighting — the objective used in the actual
+            # NeMo run (reward_weight=0.02, wwer mode).
+            # Gradient flows through ctc_per_utt; greedy decode is already done.
+            # FP32 cast guards against AMP underflow in the CTC log-softmax.
+            ctc_logits = self.ctc.ctc_lo(encoder_out).log_softmax(-1).float()
+            ctc_per_utt = F.ctc_loss(
+                ctc_logits.transpose(0, 1),       # (T, B, V)
+                text[:, : text_lengths.max()],
+                encoder_out_lens.clamp(min=1),
+                text_lengths.clamp(min=1),
+                blank=self.blank_id,
+                reduction="none",
+                zero_infinity=True,
+            )  # (B,)
+            penalty_per_utt = (1.0 - rewards.detach()).clamp(0.0, 1.0)
+            reweighted_ctc = (penalty_per_utt * ctc_per_utt).mean()
+            att_component = (
+                loss_att
+                if loss_att is not None
+                else torch.zeros(1, device=device)
+            )
+            total_loss = reweighted_ctc + (1.0 - self.ctc_weight) * att_component
+            stats["reweighted_ctc"] = reweighted_ctc.detach()
+
         else:
             # REINFORCE — GPU fix 2: FP32 cast prevents AMP underflow
             # seq_log_probs are sums over T frames; FP16 loses precision at ~±900

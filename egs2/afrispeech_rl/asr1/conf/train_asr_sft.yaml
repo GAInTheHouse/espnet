@@ -92,6 +92,7 @@ accum_grad: 2
 grad_clip: 5.0
 use_amp: true
 num_workers: 4
+seed: 42                      # NeMo seed=42
 
 # --- RL (disabled in SFT stage) ---
 rl_weight: 0.0

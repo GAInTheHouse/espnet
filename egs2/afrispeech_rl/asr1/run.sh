@@ -37,7 +37,7 @@ nj=4
 pretrained_model="espnet/librispeech_asr_train_asr_conformer_raw_bpe_batch_bins30000000_accum_grad3_optim_conflr25e-4"
 
 # Data directories
-train_set="train_combined"
+train_set="train_combined"   # AfriSpeech(clinical) + VoxPopuli(EN) + LibriSpeech(5k)
 valid_set="afrispeech_dev"
 test_sets="afrispeech_test"
 forgetting_set="librispeech_dev_clean"
@@ -61,6 +61,9 @@ reward_loss_type="penalty"   # penalty (NeMo default) | reinforce
 gemini_api_key="${GEMINI_API_KEY:-}"
 mock_llm=false
 domain_terms=""              # space-separated list, e.g. "hypertension arrhythmia"
+
+# Reproducibility
+seed=42                      # NeMo seed=42
 
 # LoRA (optional)
 use_lora=false
@@ -219,6 +222,7 @@ print(info.get('token_list',''))
                 "data/${valid_set}/text,text,text" \
             --output_dir "${sft_expdir}" \
             --rl_weight 0.0 \
+            --seed "${seed}" \
             ${lora_opts}
     log "SFT checkpoint: ${sft_expdir}/valid.loss.best.pth"
 fi
@@ -259,6 +263,7 @@ print(info.get('token_list',''))
             --output_dir "${rl_expdir}" \
             --reward_mode "${reward_mode}" \
             --reward_loss_type "${reward_loss_type}" \
+            --seed "${seed}" \
             ${domain_terms_opts} \
             ${gemini_opts} \
             ${lora_opts}
@@ -266,10 +271,10 @@ print(info.get('token_list',''))
 fi
 
 # ---------------------------------------------------------------------------
-# Stage 7: Decode AfriSpeech test + LibriSpeech (forgetting eval)
+# Stage 8: Decode AfriSpeech test + LibriSpeech (forgetting eval) + extended eval
 # ---------------------------------------------------------------------------
 if [ ${stage} -le 8 ] && [ ${stop_stage} -ge 8 ]; then
-    log "=== Stage 7: Decode and score ==="
+    log "=== Stage 8: Decode, score (WER/CER), and extended eval ==="
 
     token_list=$(python3 -c "
 import json; info = json.load(open('exp/pretrained/model_info.json'))
@@ -299,13 +304,16 @@ print(info.get('token_list',''))
                     --key_file "${decode_dir}/logdir/keys.1.scp" \
                     --output_dir "${decode_dir}/logdir/output.1"
 
-            # Score with jiwer
+            hyp_text="${decode_dir}/logdir/output.1/1best_recog/text"
+            ref_text="data/${test_set}/text"
+
+            # --- Basic WER/CER (plain text result) ---
             python3 - <<PYEOF
-import jiwer, pathlib, json
-hyp_f = pathlib.Path("${decode_dir}/logdir/output.1/1best_recog/text")
-ref_f = pathlib.Path("data/${test_set}/text")
+import jiwer, pathlib
+hyp_f = pathlib.Path("${hyp_text}")
+ref_f = pathlib.Path("${ref_text}")
 if not hyp_f.exists() or not ref_f.exists():
-    print("WARNING: hypothesis or reference not found; skipping scoring.")
+    print("WARNING: hyp or ref not found; skipping basic scoring.")
     exit(0)
 hyps = {l.split()[0]: " ".join(l.split()[1:]) for l in hyp_f.read_text().splitlines() if l.strip()}
 refs = {l.split()[0]: " ".join(l.split()[1:]) for l in ref_f.read_text().splitlines() if l.strip()}
@@ -319,13 +327,53 @@ result = f"Model: ${model_tag}  Set: ${test_set}\nWER: {wer*100:.2f}%  CER: {cer
 print(result)
 pathlib.Path("${decode_dir}/result.txt").write_text(result)
 PYEOF
+
+            # --- Extended eval (SER, EWER, domain F1, degenerate, bootstrap) ---
+            if [ -f "${hyp_text}" ] && [ -f "${ref_text}" ]; then
+                # For RL model on primary test set, compute bootstrap p-value vs SFT
+                baseline_arg=""
+                if [ "${model_tag}" = "rl" ] && [ "${test_set}" = "${test_sets%% *}" ]; then
+                    sft_hyp="exp/asr_sft/decode_${test_set}/logdir/output.1/1best_recog/text"
+                    [ -f "${sft_hyp}" ] && baseline_arg="--baseline_hyp_file ${sft_hyp}"
+                fi
+
+                python3 local/eval_extended.py \
+                    --hyp_file "${hyp_text}" \
+                    --ref_file "${ref_text}" \
+                    --domain_terms_file conf/domain_terms_clinical.txt \
+                    --bootstrap_iters 1000 \
+                    --output_json "${decode_dir}/extended_metrics.json" \
+                    ${baseline_arg} \
+                    || log "WARNING: eval_extended.py failed for ${model_tag} / ${test_set}"
+            fi
         done
     done
 
     log "=== Final results ==="
     for f in exp/asr_*/decode_*/result.txt; do
-        [ -f "${f}" ] && cat "${f}" && echo "---"
+        [ -f "${f}" ] && echo "--- ${f} ---" && cat "${f}"
     done
+
+    log "=== Extended metrics (NeMo-comparable) ==="
+    python3 - <<'PYEOF'
+import json, pathlib, sys
+files = sorted(pathlib.Path("exp").glob("asr_*/decode_*/extended_metrics.json"))
+if not files:
+    print("No extended_metrics.json files found yet.")
+    sys.exit(0)
+for f in files:
+    parts = str(f).split("/")
+    tag = f"{parts[1]}/{parts[2]}"
+    m = json.loads(f.read_text())
+    print(f"\n{tag}")
+    print(f"  WER:        {m['wer_pct']:.2f}%   CER: {m['cer_pct']:.2f}%")
+    print(f"  SER:        {m['ser_pct']:.2f}%")
+    print(f"  EWER:       {m['ewer_pct']:.2f}%  (domain utts: {m['n_utterances_with_domain_tokens']})")
+    print(f"  Domain F1:  {m['domain_f1']:.4f}  P={m['domain_precision']:.4f}  R={m['domain_recall']:.4f}")
+    print(f"  Degen frac: {m['degenerate_hyp_frac']:.6f}  mean_hyp_len: {m['mean_hyp_len_chars']:.1f}")
+    if m.get('bootstrap_pval_vs_baseline') is not None:
+        print(f"  Bootstrap p (vs SFT): {m['bootstrap_pval_vs_baseline']:.4f}")
+PYEOF
 fi
 
 log "=== run.sh complete ==="

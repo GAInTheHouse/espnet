@@ -1,16 +1,16 @@
 # conf/train_asr_rl.yaml
 # Stage 2: Reward-augmented fine-tuning (RL stage), continuing from SFT checkpoint.
 #
-# Mirrors NeMo Stage 2 from docs/FT Pipeline Methodology.docx:
-#   Loss         : CTC/attention + reward penalty  (penalty mode, default)
-#                  OR REINFORCE PG loss             (reinforce mode, via --reward_loss_type)
-#   Reward       : total_loss = ce_loss + rl_weight * (1 - mean(reward))  [penalty]
-#                  OR (1-w)*ce + w*(-reward*log_prob)                      [reinforce]
-#   rl_weight    : 0.05  (NeMo REWARD_WEIGHT=0.05)
-#   Optimizer    : AdamW, lr=1e-5  (NeMo LEARNING_RATE_RL=1e-5, 10x smaller than SFT)
-#   Epochs       : 3  (NeMo RL_EPOCHS=3)
-#   Reward mode  : mwer (default); override via --reward_mode wwer|llm|all
-#   Step interval: 4  (NeMo REWARD_STEP_INTERVAL=4)
+# Aligned to the ACTUAL NeMo run recorded in docs/results_17Apr2026.md:
+#   RL objective : reweight_ctc  (per-utterance CTC weighted by 1-reward_i)
+#   Reward mode  : wwer          (domain-weighted WER, 37-token clinical vocabulary)
+#   rl_weight    : 0.02          (NeMo actual REWARD_WEIGHT=0.02)
+#   Epochs       : 2             (NeMo actual RL_EPOCHS=2)
+#   Precision    : FP32          (NeMo FORCE_FP32=true; use_amp=false)
+#   Grad clip    : 1.0           (NeMo actual)
+#   Optimizer    : AdamW, lr=1e-5
+#   Step interval: 4             (NeMo REWARD_STEP_INTERVAL=4)
+#   Seed         : 42            (NeMo seed=42)
 
 # --- Architecture (same as SFT) ---
 encoder: conformer
@@ -79,22 +79,62 @@ scheduler_conf:
     warmup_steps: 500         # shorter warmup for RL fine-tuning
 
 # --- Training ---
-max_epoch: 3                  # NeMo RL_EPOCHS=3
+max_epoch: 2                  # NeMo actual RL_EPOCHS=2
 batch_type: numel
 batch_bins: 4000000
 accum_grad: 2
-grad_clip: 5.0
-use_amp: true
+grad_clip: 1.0                # NeMo actual grad_clip=1.0
+use_amp: false                # NeMo FORCE_FP32=true → disable AMP for RL stage
 num_workers: 4
+seed: 42                      # NeMo seed=42
 
-# --- RL config (NeMo-aligned defaults) ---
-rl_weight: 0.05               # NeMo REWARD_WEIGHT=0.05
-reward_mode: mwer             # mwer | wwer | llm | all  (override via --reward_mode)
-reward_loss_type: penalty     # penalty (NeMo default) | reinforce
+# --- RL config (aligned to NeMo actual run) ---
+rl_weight: 0.02               # NeMo actual REWARD_WEIGHT=0.02
+reward_mode: wwer             # NeMo actual reward_mode=wwer
+reward_loss_type: reweight_ctc  # NeMo actual RL objective
 reward_step_interval: 4       # NeMo REWARD_STEP_INTERVAL=4
 max_encoder_len_for_reward: 1500  # skip reward for long utterances (GPU guard)
-domain_term_weight: 3.0       # cost multiplier for domain terms in wwer mode
-domain_terms: []              # clinical vocabulary; set in run.sh --domain_terms
+domain_term_weight: 3.0       # NeMo domain_term_weight=3.0
+# 37-token clinical vocabulary (NeMo run config).
+# Also stored in conf/domain_terms_clinical.txt for eval_extended.py.
+domain_terms:
+- patient
+- hypertension
+- malaria
+- diabetes
+- medication
+- surgery
+- diagnosis
+- treatment
+- hospital
+- clinic
+- prescription
+- infection
+- antibiotic
+- dosage
+- symptom
+- fever
+- blood
+- pressure
+- chronic
+- acute
+- cardiac
+- respiratory
+- pulmonary
+- anemia
+- tuberculosis
+- hiv
+- antiretroviral
+- pregnancy
+- prenatal
+- neonatal
+- cholesterol
+- kidney
+- liver
+- cancer
+- arthritis
+- asthma
+- epilepsy
 gemini_api_key: ""            # set via --gemini_api_key or GEMINI_API_KEY env var
 mock_llm: false               # use mock LLM (mwer+noise) instead of live Gemini
 

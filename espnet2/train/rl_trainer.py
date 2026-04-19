@@ -148,6 +148,12 @@ class RLTrainerOptions(TrainerOptions):
     mock_llm: bool = False
     """Use mock LLM (mwer + Gaussian noise) even if ``gemini_api_key`` is set."""
 
+    reward_sample_dump_interval: int = 200
+    """Log up to 10 sample (utt_id, ref, hyp, reward) tuples every N optimizer
+    steps to the standard Python logger at INFO level.
+    Mirrors NeMo's reward sample dump for human verification that rewards are
+    sensible and to detect collapse early.  Set to 0 to disable."""
+
 
 # ---------------------------------------------------------------------------
 # RLTrainer
@@ -198,10 +204,13 @@ class RLTrainer(Trainer):
             "--reward_loss_type",
             type=str,
             default="reinforce",
-            choices=["reinforce", "penalty"],
+            choices=["reinforce", "penalty", "reweight_ctc"],
             help=(
-                "Loss formula: 'reinforce' = true REINFORCE PG loss; "
-                "'penalty' = NeMo-style auxiliary penalty (no policy gradient)."
+                "Loss formula: "
+                "'reinforce' = true REINFORCE PG loss; "
+                "'penalty' = NeMo-style auxiliary penalty (no policy gradient); "
+                "'reweight_ctc' = per-utterance CTC loss weighted by (1-reward_i), "
+                "the objective used in the actual NeMo run."
             ),
         )
         group.add_argument(
@@ -254,6 +263,17 @@ class RLTrainer(Trainer):
             action="store_true",
             help="Force mock LLM path even when --gemini_api_key is provided.",
         )
+        group.add_argument(
+            "--reward_sample_dump_interval",
+            type=int,
+            default=200,
+            help=(
+                "Log up to 10 sample (utt_id, ref, hyp, reward) tuples to the "
+                "logger every N optimizer steps (INFO level). "
+                "Mirrors NeMo reward sample dump for verification and collapse "
+                "detection.  Set to 0 to disable."
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Training loop
@@ -299,6 +319,7 @@ class RLTrainer(Trainer):
         domain_term_weight = options.domain_term_weight
         gemini_api_key = options.gemini_api_key or ""
         mock_llm = options.mock_llm
+        reward_sample_dump_interval = options.reward_sample_dump_interval
 
         if log_interval is None:
             try:
@@ -329,8 +350,15 @@ class RLTrainer(Trainer):
             # RLESPnetModel reads these from its forward() signature.
             # Non-tensor values pass through to_device() unchanged.
             # -----------------------------------------------------------
+            compute_reward = iiter % reward_step_interval == 0
+            # Reward sample dump: on dump steps, ask the model to log samples
+            log_reward_samples = (
+                reward_sample_dump_interval > 0
+                and compute_reward
+                and iiter % reward_sample_dump_interval == 0
+            )
             batch["rl_weight"] = rl_weight
-            batch["compute_reward"] = (iiter % reward_step_interval == 0)
+            batch["compute_reward"] = compute_reward
             batch["reward_mode"] = reward_mode
             batch["reward_loss_type"] = reward_loss_type
             batch["max_encoder_len_for_reward"] = max_encoder_len_for_reward
@@ -338,6 +366,7 @@ class RLTrainer(Trainer):
             batch["domain_term_weight"] = domain_term_weight
             batch["gemini_api_key"] = gemini_api_key
             batch["mock_llm"] = mock_llm
+            batch["log_reward_samples"] = log_reward_samples
 
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
             if no_forward_run:
