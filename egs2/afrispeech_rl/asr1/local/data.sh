@@ -32,6 +32,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECIPE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DOWNLOAD_DIR="${RECIPE_DIR}/data/downloads"
 
+# Helper: validate a kaldi dir and check it is non-empty
+_validate_kaldi_dir() {
+    local dir="$1"
+    local label="$2"
+    local n
+    n=$(wc -l < "${dir}/wav.scp" 2>/dev/null || echo 0)
+    if [ "${n}" -eq 0 ]; then
+        log "ERROR: ${label} wav.scp is empty."
+        log "       The HuggingFace download may have succeeded but produced no audio"
+        log "       (e.g. the split exists but has 0 matching samples after duration"
+        log "       filtering).  Check your HuggingFace credentials, dataset access,"
+        log "       and --min_duration / --max_duration settings, then re-run Stage 1."
+        exit 1
+    fi
+    utils/validate_data_dir.sh --no-feats "${dir}" \
+        || { log "ERROR: ${label} failed Kaldi validation — see output above"; exit 1; }
+    log "  ${label}: ${n} utterances — OK"
+}
+
 # ---------------------------------------------------------------------------
 # Stage 1: AfriSpeech-200 clinical — train split
 # ---------------------------------------------------------------------------
@@ -45,6 +64,7 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    _validate_kaldi_dir "${RECIPE_DIR}/data/afrispeech_train" "afrispeech_train"
 fi
 
 # ---------------------------------------------------------------------------
@@ -60,6 +80,9 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    # Explicit empty-dir check: the dev split is the validation set for training.
+    # A silent empty directory here causes a confusing crash many stages later.
+    _validate_kaldi_dir "${RECIPE_DIR}/data/afrispeech_dev" "afrispeech_dev"
 fi
 
 # ---------------------------------------------------------------------------
@@ -75,6 +98,7 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    _validate_kaldi_dir "${RECIPE_DIR}/data/afrispeech_test" "afrispeech_test"
 fi
 
 # ---------------------------------------------------------------------------
@@ -91,6 +115,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    _validate_kaldi_dir "${RECIPE_DIR}/data/voxpopuli_train" "voxpopuli_train"
 fi
 
 # ---------------------------------------------------------------------------
@@ -106,6 +131,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    _validate_kaldi_dir "${RECIPE_DIR}/data/voxpopuli_dev" "voxpopuli_dev"
 fi
 
 # ---------------------------------------------------------------------------
@@ -121,6 +147,7 @@ if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    _validate_kaldi_dir "${RECIPE_DIR}/data/librispeech_dev_clean" "librispeech_dev_clean"
 fi
 
 # ---------------------------------------------------------------------------
@@ -140,44 +167,43 @@ if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
         --seed "${seed}" \
         --min_duration "${min_duration}" \
         --max_duration "${max_duration}"
+    _validate_kaldi_dir "${RECIPE_DIR}/data/librispeech_train_5k" "librispeech_train_5k"
 fi
 
 # ---------------------------------------------------------------------------
 # Stage 8: Combine AfriSpeech + VoxPopuli + LibriSpeech (5k) into train_combined
 # ---------------------------------------------------------------------------
+# utils/combine_data.sh is intentionally NOT used here: it renames utterance
+# IDs by appending dataset suffixes, which breaks the speaker-prefix invariant
+# required by Kaldi's validate_data_dir.sh.  Direct sorted concatenation
+# preserves the IDs written by data_hf.py.
 if [ ${stage} -le 8 ] && [ ${stop_stage} -ge 8 ]; then
     log "Stage 8: Combining AfriSpeech + VoxPopuli + LibriSpeech(5k) into data/train_combined"
-    if command -v utils/combine_data.sh &>/dev/null; then
-        utils/combine_data.sh \
-            "${RECIPE_DIR}/data/train_combined" \
-            "${RECIPE_DIR}/data/afrispeech_train" \
-            "${RECIPE_DIR}/data/voxpopuli_train" \
-            "${RECIPE_DIR}/data/librispeech_train_5k"
-    else
-        # Fallback: concatenate then sort by utt-id (column 1), same as
-        # utils/combine_data.sh — required for validate_data_dir.sh.
-        log "utils/combine_data.sh not found; merging with LC_ALL=C sort -k1."
-        mkdir -p "${RECIPE_DIR}/data/train_combined"
-        export LC_ALL=C
-        for f in wav.scp text utt2spk; do
-            cat "${RECIPE_DIR}/data/afrispeech_train/${f}" \
-                "${RECIPE_DIR}/data/voxpopuli_train/${f}" \
-                "${RECIPE_DIR}/data/librispeech_train_5k/${f}" \
-                | sort -k1 \
-                > "${RECIPE_DIR}/data/train_combined/${f}"
-        done
-        # Rebuild spk2utt from utt2spk
-        python - <<'PYEOF'
+    mkdir -p "${RECIPE_DIR}/data/train_combined"
+    export LC_ALL=C
+    for f in wav.scp text utt2spk; do
+        cat "${RECIPE_DIR}/data/afrispeech_train/${f}" \
+            "${RECIPE_DIR}/data/voxpopuli_train/${f}" \
+            "${RECIPE_DIR}/data/librispeech_train_5k/${f}" \
+            | sort -k1,1 \
+            > "${RECIPE_DIR}/data/train_combined/${f}"
+    done
+    # Rebuild spk2utt from the merged utt2spk
+    python3 - <<'PYEOF'
 import pathlib, collections
 d = pathlib.Path("data/train_combined")
 spk2utts = collections.defaultdict(list)
 for line in (d / "utt2spk").read_text().splitlines():
-    utt, spk = line.split()
-    spk2utts[spk].append(utt)
+    parts = line.split()
+    if len(parts) == 2:
+        spk2utts[parts[1]].append(parts[0])
 lines = [f"{spk} {' '.join(sorted(utts))}\n" for spk, utts in sorted(spk2utts.items())]
 (d / "spk2utt").write_text("".join(lines))
+print(f"train_combined: {sum(len(v) for v in spk2utts.values())} utterances, {len(lines)} speakers")
 PYEOF
-    fi
+    utils/validate_data_dir.sh --no-feats "${RECIPE_DIR}/data/train_combined" \
+        || { log "ERROR: train_combined failed validation — check utt2spk sort order"; exit 1; }
+    log "  train_combined: OK"
 fi
 
 log "Data preparation complete."

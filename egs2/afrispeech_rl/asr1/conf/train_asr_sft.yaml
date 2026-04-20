@@ -1,119 +1,86 @@
-# conf/train_asr_sft.yaml
-# Stage 1: Supervised fine-tuning (SFT) on AfriSpeech-200 clinical + VoxPopuli EN.
-#
-# Mirrors NeMo Stage 1 settings from docs/FT Pipeline Methodology.docx:
-#   Architecture : EncDecCTCModelBPE equivalent → Conformer encoder + Transformer decoder
-#   Loss         : Standard CTC/attention (rl_weight=0.0)
-#   Optimizer    : AdamW, lr=1e-4  (NeMo LEARNING_RATE_SFT=1e-4)
-#   Scheduler    : Warmup (NeMo uses cosine+warmup; ESPnet WarmupLR is equivalent)
-#   Epochs       : 5  (NeMo SFT_EPOCHS=5)
-#   Precision    : Mixed FP16
-
-# --- Architecture ---
-# global_mvn: matches the pretrained pyf98/librispeech_conformer normalization layer.
-# mean/std will be overwritten by the pretrained checkpoint; the stats_file here just
-# satisfies the constructor (actual values come from init_param).
 normalize: global_mvn
 normalize_conf:
-    stats_file: /opt/homebrew/anaconda3/envs/espnet_rl/lib/python3.10/site-packages/espnet_model_zoo/models--pyf98--librispeech_conformer/snapshots/b74448c3b089eceea913735bd59a76d5252d8eec/exp/asr_stats_raw_en_bpe5000_sp/train/feats_stats.npz
-
+  stats_file: /opt/homebrew/anaconda3/envs/espnet_rl/lib/python3.10/site-packages/espnet_model_zoo/models--pyf98--librispeech_conformer/blobs/f7db198971ff67721e6accdb8cecd03e9674675c
 encoder: conformer
 encoder_conf:
-    output_size: 512
-    attention_heads: 8
-    linear_units: 2048
-    num_blocks: 12
-    dropout_rate: 0.1
-    positional_dropout_rate: 0.1
-    attention_dropout_rate: 0.1
-    input_layer: conv2d
-    normalize_before: true
-    macaron_style: true
-    pos_enc_layer_type: rel_pos
-    selfattention_layer_type: rel_selfattn
-    activation_type: swish
-    use_cnn_module: true
-    cnn_module_kernel: 31
-
+  output_size: 512
+  attention_heads: 8
+  linear_units: 2048
+  num_blocks: 12
+  dropout_rate: 0.1
+  positional_dropout_rate: 0.1
+  attention_dropout_rate: 0.1
+  input_layer: conv2d
+  normalize_before: true
+  macaron_style: true
+  pos_enc_layer_type: rel_pos
+  selfattention_layer_type: rel_selfattn
+  activation_type: swish
+  use_cnn_module: true
+  cnn_module_kernel: 31
 decoder: transformer
 decoder_conf:
-    attention_heads: 8
-    linear_units: 2048
-    num_blocks: 6
-    dropout_rate: 0.1
-    positional_dropout_rate: 0.1
-    self_attention_dropout_rate: 0.1
-    src_attention_dropout_rate: 0.1
-
-# --- Model config ---
+  attention_heads: 8
+  linear_units: 2048
+  num_blocks: 6
+  dropout_rate: 0.1
+  positional_dropout_rate: 0.1
+  self_attention_dropout_rate: 0.1
+  src_attention_dropout_rate: 0.1
 model_conf:
-    ctc_weight: 0.3
-    lsm_weight: 0.1           # label-smoothing
-    length_normalized_loss: false
-
-# --- Freezing (bottom 6 encoder layers stay frozen in SFT) ---
+  ctc_weight: 0.3
+  lsm_weight: 0.1
+  length_normalized_loss: false
 freeze_param:
-    - encoder.encoders.0
-    - encoder.encoders.1
-    - encoder.encoders.2
-    - encoder.encoders.3
-    - encoder.encoders.4
-    - encoder.encoders.5
-
-# --- SpecAugment ---
+- encoder.encoders.0
+- encoder.encoders.1
+- encoder.encoders.2
+- encoder.encoders.3
+- encoder.encoders.4
+- encoder.encoders.5
 specaug: specaug
 specaug_conf:
-    apply_time_warp: true
-    time_warp_window: 5
-    apply_time_mask: true
-    time_mask_width_ratio_range:
-    - 0.0
-    - 0.05
-    num_time_mask: 5
-    apply_freq_mask: true
-    freq_mask_width_range:
-    - 0
-    - 30
-    num_freq_mask: 2
-
-# --- Optimizer (AdamW, NeMo LEARNING_RATE_SFT=1e-4, weight_decay=1e-3) ---
+  apply_time_warp: true
+  time_warp_window: 5
+  apply_time_mask: true
+  time_mask_width_ratio_range:
+  - 0.0
+  - 0.05
+  num_time_mask: 5
+  apply_freq_mask: true
+  freq_mask_width_range:
+  - 0
+  - 30
+  num_freq_mask: 2
 optim: adamw
 optim_conf:
-    lr: 1.0e-4
-    betas:
-    - 0.9
-    - 0.98
-    weight_decay: 1.0e-3
-    eps: 1.0e-8
-
-# --- Scheduler (warmup — equivalent to NeMo cosine+warmup) ---
+  lr: 0.0001
+  betas:
+  - 0.9
+  - 0.98
+  weight_decay: 0.001
+  eps: 1.0e-08
 scheduler: warmuplr
 scheduler_conf:
-    warmup_steps: 2000
-
-# --- Training ---
-max_epoch: 5                  # NeMo SFT_EPOCHS=5
+  warmup_steps: 2000
+max_epoch: 5
 batch_type: numel
 batch_bins: 4000000
 accum_grad: 2
 grad_clip: 5.0
 use_amp: false
 num_workers: 4
-seed: 42                      # NeMo seed=42
-
-# --- RL (disabled in SFT stage) ---
+seed: 42
 rl_weight: 0.0
-
-# --- LoRA (disabled by default; activated via run.sh --use_lora true) ---
 use_adapter: false
 adapter: lora
 adapter_conf:
-    rank: 8
-    alpha: 16
-    target_modules:
-    - linear_q
-    - linear_k
-    - linear_v
-    - linear_out
-    - w_1
-    - w_2
+  rank: 8
+  alpha: 16
+  target_modules:
+  - linear_q
+  - linear_k
+  - linear_v
+  - linear_out
+  - w_1
+  - w_2

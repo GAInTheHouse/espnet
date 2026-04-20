@@ -94,6 +94,19 @@ if [ ! -f "${ASR_SH}" ]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Device guard: fall back to CPU if the requested GPU count exceeds what
+# PyTorch can actually see.  This prevents the cryptic CUDA assertion on
+# machines without NVIDIA hardware (e.g. Macs, CPU-only cloud VMs).
+# ---------------------------------------------------------------------------
+if [ "${ngpu}" -gt 0 ]; then
+    if ! python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+        log "WARNING: ngpu=${ngpu} requested but torch.cuda.is_available()=False."
+        log "         Falling back to --ngpu 0 (CPU).  Set --ngpu 0 explicitly to silence this."
+        ngpu=0
+    fi
+fi
+
 # Build optional LoRA flag string for asr_train_rl calls
 lora_opts=""
 if [ "${use_lora}" = true ]; then
@@ -143,19 +156,22 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Stage 3: BPE tokenizer training
+# Stage 3: BPE tokenizer — verify pretrained BPE model is in place
 # ---------------------------------------------------------------------------
+# We reuse the pretrained model's tokenizer (same vocabulary as init_param),
+# so no new BPE training is needed.  setup_pretrained.py (Stage 5) copies the
+# model to the expected location.  If Stage 5 has already run we simply verify
+# the file is present; if not, Stage 5 must run first.
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
-    log "=== Stage 3: BPE training (${nbpe} units) ==="
-    bash "${ASR_SH}" \
-        --stage 5 --stop_stage 5 \
-        --skip_train true \
-        --bpemode unigram \
-        --nbpe "${nbpe}" \
-        --bpe_train_text "${bpe_train_text}" \
-        --train_set "${train_set}" \
-        --valid_set "${valid_set}" \
-        --test_sets "${test_sets}"
+    log "=== Stage 3: Verifying pretrained BPE model ==="
+    bpe_dst="data/token_list/bpe_unigram${nbpe}/bpe.model"
+    if [ ! -f "${bpe_dst}" ]; then
+        log "ERROR: ${bpe_dst} not found."
+        log "       Run Stage 5 first (bash run.sh --stage 5 --stop_stage 5) to"
+        log "       download the pretrained model and place the BPE tokenizer."
+        exit 1
+    fi
+    log "  BPE model OK: ${bpe_dst}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -200,32 +216,23 @@ PYEOF
 fi
 
 # ---------------------------------------------------------------------------
-# Stage 5: Download pretrained model and resolve checkpoint path
+# Stage 5: Download pretrained model, extract config, patch training YAMLs
 # ---------------------------------------------------------------------------
+# local/setup_pretrained.py handles everything:
+#   - ModelDownloader.download_and_unpack
+#   - token_list  → exp/pretrained/tokens.txt
+#   - bpe.model   → data/token_list/bpe_unigram{nbpe}/bpe.model
+#   - patches encoder_conf / decoder_conf / normalize in both training YAMLs
+#   - writes exp/pretrained/model_info.json
+#   - exits non-zero if any required field is missing
 if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
-    log "=== Stage 5: Downloading pretrained model ==="
-    mkdir -p exp/pretrained
-    python3 - <<PYEOF
-from espnet_model_zoo.downloader import ModelDownloader
-import json, pathlib, yaml
-d = ModelDownloader()
-info = d.download_and_unpack("${pretrained_model}")
-# Extract token_list from the pretrained training config and write to a text file.
-# The config embeds the list inline; asr_train_rl expects a one-token-per-line file.
-try:
-    cfg = yaml.safe_load(open(info["asr_train_config"]))
-    tokens = cfg.get("token_list", [])
-    if isinstance(tokens, list) and tokens:
-        tok_file = pathlib.Path("exp/pretrained/tokens.txt")
-        tok_file.write_text("\n".join(tokens) + "\n")
-        info["token_list"] = str(tok_file.resolve())
-        print(f"  token_list      : {tok_file} ({len(tokens)} tokens)")
-except Exception as e:
-    print(f"  WARNING: could not extract token_list: {e}")
-pathlib.Path("exp/pretrained/model_info.json").write_text(json.dumps(info, indent=2))
-print("  asr_train_config:", info.get("asr_train_config",""))
-print("  asr_model_file  :", info.get("asr_model_file",""))
-PYEOF
+    log "=== Stage 5: Downloading and configuring pretrained model ==="
+    python3 local/setup_pretrained.py \
+        --model   "${pretrained_model}" \
+        --outdir  exp/pretrained \
+        --sft_config "${sft_config}" \
+        --rl_config  "${rl_config}" \
+        --nbpe    "${nbpe}"
 fi
 
 # ---------------------------------------------------------------------------

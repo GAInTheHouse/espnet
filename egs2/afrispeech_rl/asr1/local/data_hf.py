@@ -92,16 +92,26 @@ def _duration_ok(
     return min_duration <= duration <= max_duration
 
 
-def _sanitize_kaldi_id(s: str) -> str:
-    """Make a string safe for Kaldi utterance / speaker IDs.
+def _sanitize_kaldi_id(s) -> str:
+    """Make a value safe for use as a Kaldi utterance / speaker ID.
 
     Kaldi ``validate_data_dir.sh`` requires ``utt2spk`` to pass
     ``sort -k2 -C`` (non-decreasing speaker in utterance-id sort order).
     That holds when **speaker-id is a prefix of utterance-id** and lines
     are sorted by utterance-id — we enforce the prefix rule in the iterators
     below and sort rows in ``write_kaldi_dir``.
+
+    Handles non-string inputs (int, float, None) that appear in HuggingFace
+    metadata (e.g. VoxPopuli ``speaker_id`` can be an int or Python ``None``).
     """
-    s = str(s).strip().replace(" ", "_").replace("/", "_")
+    # Guard against None and numeric types before calling str()
+    if s is None:
+        return "unknown_spk"
+    s = str(s).strip()
+    # str(None) == "None" — normalise to unknown_spk
+    if s.lower() in ("none", "null", "nan", ""):
+        return "unknown_spk"
+    s = s.replace(" ", "_").replace("/", "_")
     s = re.sub(r"[^0-9A-Za-z._-]+", "_", s)
     return s if s else "unknown_spk"
 
@@ -201,7 +211,7 @@ def _iter_voxpopuli(
             skipped += 1
             continue
 
-        spk = _sanitize_kaldi_id(str(ex.get("speaker_id", f"spk{idx:06d}")))
+        spk = _sanitize_kaldi_id(ex.get("speaker_id") or f"spk{idx:06d}")
         utt_id = f"{spk}-voxpopuli_{split}_{rank:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
@@ -253,8 +263,8 @@ def _iter_librispeech(
             skipped += 1
             continue
 
-        spk = _sanitize_kaldi_id(str(ex.get("speaker_id", f"spk{idx:06d}")))
-        chapter = _sanitize_kaldi_id(str(ex.get("chapter_id", "0")))
+        spk = _sanitize_kaldi_id(ex.get("speaker_id") or f"spk{idx:06d}")
+        chapter = _sanitize_kaldi_id(ex.get("chapter_id") or "0")
         # Libri-style id: spk is already a prefix (Kaldi-friendly).
         utt_id = f"{spk}-{chapter}-{idx:07d}"
 
