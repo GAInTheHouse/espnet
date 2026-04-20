@@ -44,19 +44,28 @@ class RLASRTask(ASRTask):
     def build_model(cls, args):
         """Build RLESPnetModel instead of ESPnetASRModel.
 
-        The parent ASRTask.build_model() is reused verbatim: we only
-        temporarily replace the ``ESPnetASRModel`` name in the asr module's
-        namespace so that the final ``model = ESPnetASRModel(...)`` call
-        instantiates our subclass instead.
+        Two patches are required in concert:
+        1. ``model_choices`` registry — controls which class is actually
+           instantiated inside build_model().
+        2. Module namespace ``ESPnetASRModel`` — controls the type that
+           typeguard resolves when it checks the ``-> ESPnetASRModel``
+           return annotation on the parent's @typechecked build_model.
+        Patching only one of the two causes a TypeCheckError (the returned
+        object's type won't match what typeguard resolved for the annotation).
         """
         from espnet2.asr.rl_espnet_model import RLESPnetModel
 
-        _orig = getattr(_asr_module, "ESPnetASRModel", None)
+        _orig_name = getattr(_asr_module, "ESPnetASRModel", None)
+        _orig_cls = _asr_module.model_choices.classes.get("espnet")
+
         _asr_module.ESPnetASRModel = RLESPnetModel
+        _asr_module.model_choices.classes["espnet"] = RLESPnetModel
         try:
             model = super().build_model(args)
         finally:
-            if _orig is not None:
-                _asr_module.ESPnetASRModel = _orig
+            if _orig_name is not None:
+                _asr_module.ESPnetASRModel = _orig_name
+            if _orig_cls is not None:
+                _asr_module.model_choices.classes["espnet"] = _orig_cls
 
         return model

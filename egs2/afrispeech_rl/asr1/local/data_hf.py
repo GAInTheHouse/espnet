@@ -38,11 +38,11 @@ python local/data_hf.py \\
 import argparse
 import collections
 import logging
-import os
 import pathlib
 import random
+import re
 import sys
-from typing import Iterator, Tuple
+from typing import Iterator, List, Tuple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,6 +92,20 @@ def _duration_ok(
     return min_duration <= duration <= max_duration
 
 
+def _sanitize_kaldi_id(s: str) -> str:
+    """Make a string safe for Kaldi utterance / speaker IDs.
+
+    Kaldi ``validate_data_dir.sh`` requires ``utt2spk`` to pass
+    ``sort -k2 -C`` (non-decreasing speaker in utterance-id sort order).
+    That holds when **speaker-id is a prefix of utterance-id** and lines
+    are sorted by utterance-id — we enforce the prefix rule in the iterators
+    below and sort rows in ``write_kaldi_dir``.
+    """
+    s = str(s).strip().replace(" ", "_").replace("/", "_")
+    s = re.sub(r"[^0-9A-Za-z._-]+", "_", s)
+    return s if s else "unknown_spk"
+
+
 # ---------------------------------------------------------------------------
 # Dataset-specific iterators  →  yield (utt_id, spk_id, wav_path, text)
 # ---------------------------------------------------------------------------
@@ -136,10 +150,11 @@ def _iter_afrispeech(
             skipped += 1
             continue
 
-        spk = str(ex.get("accent", ex.get("speaker_id", f"spk{idx:06d}"))).replace(
-            " ", "_"
+        spk = _sanitize_kaldi_id(
+            str(ex.get("accent", ex.get("speaker_id", f"spk{idx:06d}")))
         )
-        utt_id = f"afrispeech_{split}_{idx:07d}"
+        # Speaker prefix so utt2spk is valid for Kaldi (sort -k2 -C).
+        utt_id = f"{spk}-afrispeech_{split}_{idx:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
@@ -186,8 +201,8 @@ def _iter_voxpopuli(
             skipped += 1
             continue
 
-        spk = str(ex.get("speaker_id", f"spk{idx:06d}"))
-        utt_id = f"voxpopuli_{split}_{rank:07d}"
+        spk = _sanitize_kaldi_id(str(ex.get("speaker_id", f"spk{idx:06d}")))
+        utt_id = f"{spk}-voxpopuli_{split}_{rank:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
@@ -238,8 +253,9 @@ def _iter_librispeech(
             skipped += 1
             continue
 
-        spk = str(ex.get("speaker_id", f"spk{idx:06d}"))
-        chapter = str(ex.get("chapter_id", "0"))
+        spk = _sanitize_kaldi_id(str(ex.get("speaker_id", f"spk{idx:06d}")))
+        chapter = _sanitize_kaldi_id(str(ex.get("chapter_id", "0")))
+        # Libri-style id: spk is already a prefix (Kaldi-friendly).
         utt_id = f"{spk}-{chapter}-{idx:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
@@ -262,26 +278,36 @@ def write_kaldi_dir(
     iterator: Iterator[Tuple[str, str, pathlib.Path, str]],
     output_dir: pathlib.Path,
 ) -> int:
-    """Consume iterator and write wav.scp / text / utt2spk / spk2utt."""
+    """Consume iterator and write wav.scp / text / utt2spk / spk2utt.
+
+    Rows are sorted by ``utt_id`` so scp/text/utt2spk match Kaldi's
+    ``check_sorted_and_uniq`` and (with spk-prefix utterance ids) ``sort -k2 -C``
+    on ``utt2spk``.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    wav_lines = []
-    text_lines = []
-    utt2spk_lines = []
-    spk2utts: dict = collections.defaultdict(list)
-
+    rows: List[Tuple[str, str, pathlib.Path, str]] = []
     count = 0
     for utt_id, spk, wav_path, transcript in iterator:
         if not transcript:
             log.debug("Skipping %s: empty transcript", utt_id)
             continue
+        rows.append((utt_id, spk, wav_path, transcript))
+        count += 1
+        if count % 1000 == 0:
+            log.info("  Processed %d utterances ...", count)
+
+    rows.sort(key=lambda r: r[0])
+    spk2utts: dict = collections.defaultdict(list)
+
+    wav_lines: List[str] = []
+    text_lines: List[str] = []
+    utt2spk_lines: List[str] = []
+    for utt_id, spk, wav_path, transcript in rows:
         wav_lines.append(f"{utt_id} {wav_path}\n")
         text_lines.append(f"{utt_id} {transcript}\n")
         utt2spk_lines.append(f"{utt_id} {spk}\n")
         spk2utts[spk].append(utt_id)
-        count += 1
-        if count % 1000 == 0:
-            log.info("  Processed %d utterances ...", count)
 
     (output_dir / "wav.scp").write_text("".join(wav_lines))
     (output_dir / "text").write_text("".join(text_lines))
@@ -293,8 +319,8 @@ def write_kaldi_dir(
     ]
     (output_dir / "spk2utt").write_text("".join(spk2utt_lines))
 
-    log.info("Wrote %d utterances to %s", count, output_dir)
-    return count
+    log.info("Wrote %d utterances to %s", len(rows), output_dir)
+    return len(rows)
 
 
 # ---------------------------------------------------------------------------

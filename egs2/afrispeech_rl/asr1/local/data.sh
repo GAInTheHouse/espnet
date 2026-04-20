@@ -154,13 +154,16 @@ if [ ${stage} -le 8 ] && [ ${stop_stage} -ge 8 ]; then
             "${RECIPE_DIR}/data/voxpopuli_train" \
             "${RECIPE_DIR}/data/librispeech_train_5k"
     else
-        # Fallback: simple concatenation without Kaldi utils
-        log "utils/combine_data.sh not found; concatenating manually."
+        # Fallback: concatenate then sort by utt-id (column 1), same as
+        # utils/combine_data.sh — required for validate_data_dir.sh.
+        log "utils/combine_data.sh not found; merging with LC_ALL=C sort -k1."
         mkdir -p "${RECIPE_DIR}/data/train_combined"
+        export LC_ALL=C
         for f in wav.scp text utt2spk; do
             cat "${RECIPE_DIR}/data/afrispeech_train/${f}" \
                 "${RECIPE_DIR}/data/voxpopuli_train/${f}" \
                 "${RECIPE_DIR}/data/librispeech_train_5k/${f}" \
+                | sort -k1 \
                 > "${RECIPE_DIR}/data/train_combined/${f}"
         done
         # Rebuild spk2utt from utt2spk

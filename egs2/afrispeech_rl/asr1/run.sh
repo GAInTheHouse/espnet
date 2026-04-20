@@ -20,6 +20,11 @@
 # -------------
 #   pip install -r ../../../requirements_rl.txt
 #   ESPNET_ROOT must be set or inferable from this script's location.
+#   One-time recipe links (same as other egs2/*/asr1 recipes):
+#     ln -sf ../../TEMPLATE/asr1/utils     utils
+#     ln -sf ../../TEMPLATE/asr1/steps     steps
+#     ln -sf ../../TEMPLATE/asr1/scripts scripts
+#     ln -sf ../../TEMPLATE/asr1/pyscripts pyscripts
 
 set -euo pipefail
 
@@ -34,7 +39,10 @@ ngpu=1
 nj=4
 
 # Pretrained model (LibriSpeech Conformer from ESPnet model zoo)
-pretrained_model="espnet/librispeech_asr_train_asr_conformer_raw_bpe_batch_bins30000000_accum_grad3_optim_conflr25e-4"
+# pyf98/librispeech_conformer is a publicly accessible ESPnet2 Conformer
+# trained on LibriSpeech 960h, BPE-5000 — same architecture as the original
+# private espnet/ model.  Swap back once you have HF org access.
+pretrained_model="pyf98/librispeech_conformer"
 
 # Data directories
 train_set="train_combined"   # AfriSpeech(clinical) + VoxPopuli(EN) + LibriSpeech(5k)
@@ -121,9 +129,10 @@ fi
 # ---------------------------------------------------------------------------
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     log "=== Stage 2: Feature formatting (raw) ==="
+    # Run WITHOUT --skip_train so that dump/raw/<train_set> and
+    # dump/raw/<valid_set> are also formatted (needed for Stage 6 training).
     bash "${ASR_SH}" \
         --stage 2 --stop_stage 4 \
-        --skip_train true \
         --feats_type "${feats_type}" \
         --audio_format "${audio_format}" \
         --fs "${fs}" \
@@ -153,16 +162,41 @@ fi
 # Stage 4: Collect normalization statistics
 # ---------------------------------------------------------------------------
 if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
-    log "=== Stage 4: Collecting statistics ==="
-    bash "${ASR_SH}" \
-        --stage 9 --stop_stage 9 \
-        --skip_train true \
-        --feats_type "${feats_type}" \
-        --asr_config "${sft_config}" \
-        --train_set "${train_set}" \
-        --valid_set "${valid_set}" \
-        --test_sets "${test_sets}" \
-        --nj "${nj}"
+    log "=== Stage 4: Collecting statistics (shape files for batch sampler) ==="
+    # asr.sh stage 10 (collect_stats) cannot parse rl_weight from the config.
+    # Generate speech_shape and text_shape.bpe directly.
+    python3 - <<PYEOF
+import pathlib, soundfile, sentencepiece
+
+bpe_model = "data/token_list/bpe_unigram5000/bpe.model"
+sp = sentencepiece.SentencePieceProcessor()
+sp.Load(bpe_model)
+
+stats_dir = pathlib.Path("exp/asr_stats_raw_bpe5000")
+pairs = [
+    ("train", "dump/raw/${train_set}/wav.scp", "data/${train_set}/text"),
+    ("valid", "dump/raw/${valid_set}/wav.scp", "data/${valid_set}/text"),
+]
+for split, wav_scp, text_file in pairs:
+    out_dir = stats_dir / split
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shapes = []
+    for line in pathlib.Path(wav_scp).read_text().splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2: continue
+        uid, wp = parts
+        try: shapes.append(f"{uid} {soundfile.info(wp).frames}\n")
+        except Exception as e: print(f"WARNING: {wp}: {e}")
+    (out_dir / "speech_shape").write_text("".join(sorted(shapes)))
+    tshapes = []
+    for line in pathlib.Path(text_file).read_text().splitlines():
+        parts = line.split(None, 1)
+        if len(parts) < 1: continue
+        uid = parts[0]; ref = parts[1] if len(parts) > 1 else ""
+        tshapes.append(f"{uid} {len(sp.EncodeAsPieces(ref)) + 1}\n")
+    (out_dir / "text_shape.bpe").write_text("".join(sorted(tshapes)))
+    print(f"{split}: {len(shapes)} speech, {len(tshapes)} text shapes")
+PYEOF
 fi
 
 # ---------------------------------------------------------------------------
@@ -173,9 +207,21 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     mkdir -p exp/pretrained
     python3 - <<PYEOF
 from espnet_model_zoo.downloader import ModelDownloader
-import json, pathlib
+import json, pathlib, yaml
 d = ModelDownloader()
 info = d.download_and_unpack("${pretrained_model}")
+# Extract token_list from the pretrained training config and write to a text file.
+# The config embeds the list inline; asr_train_rl expects a one-token-per-line file.
+try:
+    cfg = yaml.safe_load(open(info["asr_train_config"]))
+    tokens = cfg.get("token_list", [])
+    if isinstance(tokens, list) and tokens:
+        tok_file = pathlib.Path("exp/pretrained/tokens.txt")
+        tok_file.write_text("\n".join(tokens) + "\n")
+        info["token_list"] = str(tok_file.resolve())
+        print(f"  token_list      : {tok_file} ({len(tokens)} tokens)")
+except Exception as e:
+    print(f"  WARNING: could not extract token_list: {e}")
 pathlib.Path("exp/pretrained/model_info.json").write_text(json.dumps(info, indent=2))
 print("  asr_train_config:", info.get("asr_train_config",""))
 print("  asr_model_file  :", info.get("asr_model_file",""))
@@ -204,6 +250,13 @@ import json; info = json.load(open('exp/pretrained/model_info.json'))
 print(info.get('token_list',''))
 ")
 
+    bpemodel=$(python3 -c "
+import json; info = json.load(open('exp/pretrained/model_info.json'))
+print(info.get('bpemodel',''))
+")
+
+    asr_stats_dir="exp/asr_stats_raw_bpe5000"
+
     mkdir -p "${sft_expdir}"
     # shellcheck disable=SC2086
     ${cuda_cmd} --gpu "${ngpu}" "${sft_expdir}/train.log" \
@@ -211,15 +264,20 @@ print(info.get('token_list',''))
             --ngpu "${ngpu}" \
             --config "${sft_config}" \
             --token_list "${token_list}" \
+            --bpemodel "${bpemodel}" \
             --init_param "${pretrained_pth}" \
             --train_data_path_and_name_and_type \
                 "dump/raw/${train_set}/wav.scp,speech,sound" \
             --train_data_path_and_name_and_type \
                 "data/${train_set}/text,text,text" \
+            --train_shape_file "${asr_stats_dir}/train/speech_shape" \
+            --train_shape_file "${asr_stats_dir}/train/text_shape.bpe" \
             --valid_data_path_and_name_and_type \
                 "dump/raw/${valid_set}/wav.scp,speech,sound" \
             --valid_data_path_and_name_and_type \
                 "data/${valid_set}/text,text,text" \
+            --valid_shape_file "${asr_stats_dir}/valid/speech_shape" \
+            --valid_shape_file "${asr_stats_dir}/valid/text_shape.bpe" \
             --output_dir "${sft_expdir}" \
             --rl_weight 0.0 \
             --seed "${seed}" \
@@ -244,6 +302,13 @@ import json; info = json.load(open('exp/pretrained/model_info.json'))
 print(info.get('token_list',''))
 ")
 
+    bpemodel=$(python3 -c "
+import json; info = json.load(open('exp/pretrained/model_info.json'))
+print(info.get('bpemodel',''))
+")
+
+    asr_stats_dir="exp/asr_stats_raw_bpe5000"
+
     mkdir -p "${rl_expdir}"
     # shellcheck disable=SC2086
     ${cuda_cmd} --gpu "${ngpu}" "${rl_expdir}/train.log" \
@@ -251,15 +316,20 @@ print(info.get('token_list',''))
             --ngpu "${ngpu}" \
             --config "${rl_config}" \
             --token_list "${token_list}" \
+            --bpemodel "${bpemodel}" \
             --init_param "${sft_ckpt}" \
             --train_data_path_and_name_and_type \
                 "dump/raw/${train_set}/wav.scp,speech,sound" \
             --train_data_path_and_name_and_type \
                 "data/${train_set}/text,text,text" \
+            --train_shape_file "${asr_stats_dir}/train/speech_shape" \
+            --train_shape_file "${asr_stats_dir}/train/text_shape.bpe" \
             --valid_data_path_and_name_and_type \
                 "dump/raw/${valid_set}/wav.scp,speech,sound" \
             --valid_data_path_and_name_and_type \
                 "data/${valid_set}/text,text,text" \
+            --valid_shape_file "${asr_stats_dir}/valid/speech_shape" \
+            --valid_shape_file "${asr_stats_dir}/valid/text_shape.bpe" \
             --output_dir "${rl_expdir}" \
             --reward_mode "${reward_mode}" \
             --reward_loss_type "${reward_loss_type}" \

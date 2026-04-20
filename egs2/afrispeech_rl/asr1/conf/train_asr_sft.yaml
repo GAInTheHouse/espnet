@@ -10,10 +10,17 @@
 #   Precision    : Mixed FP16
 
 # --- Architecture ---
+# global_mvn: matches the pretrained pyf98/librispeech_conformer normalization layer.
+# mean/std will be overwritten by the pretrained checkpoint; the stats_file here just
+# satisfies the constructor (actual values come from init_param).
+normalize: global_mvn
+normalize_conf:
+    stats_file: /opt/homebrew/anaconda3/envs/espnet_rl/lib/python3.10/site-packages/espnet_model_zoo/models--pyf98--librispeech_conformer/snapshots/b74448c3b089eceea913735bd59a76d5252d8eec/exp/asr_stats_raw_en_bpe5000_sp/train/feats_stats.npz
+
 encoder: conformer
 encoder_conf:
-    output_size: 256
-    attention_heads: 4
+    output_size: 512
+    attention_heads: 8
     linear_units: 2048
     num_blocks: 12
     dropout_rate: 0.1
@@ -30,7 +37,7 @@ encoder_conf:
 
 decoder: transformer
 decoder_conf:
-    attention_heads: 4
+    attention_heads: 8
     linear_units: 2048
     num_blocks: 6
     dropout_rate: 0.1
@@ -90,7 +97,7 @@ batch_type: numel
 batch_bins: 4000000
 accum_grad: 2
 grad_clip: 5.0
-use_amp: true
+use_amp: false
 num_workers: 4
 seed: 42                      # NeMo seed=42
 
