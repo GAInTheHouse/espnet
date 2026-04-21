@@ -131,41 +131,43 @@ def _iter_afrispeech(
 ) -> Iterator[Tuple[str, str, pathlib.Path, str]]:
     """Iterate AfriSpeech-200, filtered to domain=='clinical'.
 
+    Uses streaming=True so audio is decoded one example at a time and never
+    written to the HF cache directory (avoids filling the boot disk).
     Applies duration filter: 0.5s ≤ duration ≤ 20.0s (NeMo defaults).
     """
     import datasets as hf_datasets
 
-    log.info("Loading tobiolatunji/afrispeech-200 split=%s ...", split)
+    log.info("Loading tobiolatunji/afrispeech-200 split=%s (streaming) ...", split)
     ds = hf_datasets.load_dataset(
         "tobiolatunji/afrispeech-200",
-        "all",           # required config name — loads all accents; we filter to clinical below
+        "all",           # config name — loads all accents; filtered to clinical below
         split=split,
+        streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
 
-    # Filter to clinical domain
+    # Filter to clinical domain — works on IterableDataset without materialising
     ds = ds.filter(lambda ex: ex.get("domain", "").lower() == "clinical")
-    log.info("  After clinical filter: %d utterances", len(ds))
 
-    indices = list(range(len(ds)))
-    if max_samples > 0 and len(indices) > max_samples:
-        rng = random.Random(seed)
-        indices = rng.sample(indices, max_samples)
-        log.info("  Subsampled to %d utterances (seed=%d)", max_samples, seed)
+    # Shuffle with a buffer then take up to max_samples (reproducible via seed)
+    shuffle_buf = min(max_samples * 3 if max_samples > 0 else 5000, 5000)
+    ds = ds.shuffle(seed=seed, buffer_size=shuffle_buf)
+    if max_samples > 0:
+        ds = ds.take(max_samples)
+        log.info("  Will take up to %d clinical utterances (seed=%d)", max_samples, seed)
 
     skipped = 0
-    for idx in indices:
-        ex = ds[idx]
+    for rank, ex in enumerate(ds):
         audio = ex["audio"]
         if not _duration_ok(audio["array"], audio["sampling_rate"], min_duration, max_duration):
             skipped += 1
             continue
 
         spk = _sanitize_kaldi_id(
-            str(ex.get("accent", ex.get("speaker_id", f"spk{idx:06d}")))
+            ex.get("accent") or ex.get("speaker_id") or f"spk{rank:06d}"
         )
         # Speaker prefix so utt2spk is valid for Kaldi (sort -k2 -C).
-        utt_id = f"{spk}-afrispeech_{split}_{idx:07d}"
+        utt_id = f"{spk}-afrispeech_{split}_{rank:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
@@ -186,33 +188,36 @@ def _iter_voxpopuli(
     min_duration: float = 0.5,
     max_duration: float = 20.0,
 ) -> Iterator[Tuple[str, str, pathlib.Path, str]]:
-    """Iterate VoxPopuli EN.  Applies duration filter (NeMo: 0.5s–20.0s)."""
+    """Iterate VoxPopuli EN.
+
+    Uses streaming=True to avoid caching the full corpus (~24k h) to disk.
+    Applies duration filter (NeMo: 0.5s–20.0s).
+    """
     import datasets as hf_datasets
 
-    log.info("Loading facebook/voxpopuli (en) split=%s ...", split)
+    log.info("Loading facebook/voxpopuli (en) split=%s (streaming) ...", split)
     ds = hf_datasets.load_dataset(
         "facebook/voxpopuli",
         "en",
         split=split,
-        streaming=False,
+        streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
 
-    indices = list(range(len(ds)))
-    if max_samples > 0 and len(indices) > max_samples:
-        rng = random.Random(seed)
-        indices = rng.sample(indices, max_samples)
-        log.info("  Subsampled to %d utterances (seed=%d)", max_samples, seed)
+    shuffle_buf = min(max_samples * 3 if max_samples > 0 else 5000, 5000)
+    ds = ds.shuffle(seed=seed, buffer_size=shuffle_buf)
+    if max_samples > 0:
+        ds = ds.take(max_samples)
+        log.info("  Will take up to %d utterances (seed=%d)", max_samples, seed)
 
     skipped = 0
-    for rank, idx in enumerate(indices):
-        ex = ds[idx]
+    for rank, ex in enumerate(ds):
         audio = ex["audio"]
         if not _duration_ok(audio["array"], audio["sampling_rate"], min_duration, max_duration):
             skipped += 1
             continue
 
-        spk = _sanitize_kaldi_id(ex.get("speaker_id") or f"spk{idx:06d}")
+        spk = _sanitize_kaldi_id(ex.get("speaker_id") or f"spk{rank:06d}")
         utt_id = f"{spk}-voxpopuli_{split}_{rank:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
@@ -238,36 +243,37 @@ def _iter_librispeech(
 ) -> Iterator[Tuple[str, str, pathlib.Path, str]]:
     """Iterate LibriSpeech via HuggingFace openslr/librispeech_asr.
 
+    Uses streaming=True to avoid downloading the full corpus to disk.
     Applies duration filter (NeMo: 0.5s–20.0s).
     """
     import datasets as hf_datasets
 
-    log.info("Loading openslr/librispeech_asr split=%s ...", split)
+    log.info("Loading openslr/librispeech_asr split=%s (streaming) ...", split)
     ds = hf_datasets.load_dataset(
         "openslr/librispeech_asr",
         "clean",
         split=split,
+        streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
 
-    indices = list(range(len(ds)))
-    if max_samples > 0 and len(indices) > max_samples:
-        rng = random.Random(seed)
-        indices = rng.sample(indices, max_samples)
-        log.info("  Subsampled to %d utterances (seed=%d)", max_samples, seed)
+    shuffle_buf = min(max_samples * 3 if max_samples > 0 else 5000, 5000)
+    ds = ds.shuffle(seed=seed, buffer_size=shuffle_buf)
+    if max_samples > 0:
+        ds = ds.take(max_samples)
+        log.info("  Will take up to %d utterances (seed=%d)", max_samples, seed)
 
     skipped = 0
-    for idx in indices:
-        ex = ds[idx]
+    for rank, ex in enumerate(ds):
         audio = ex["audio"]
         if not _duration_ok(audio["array"], audio["sampling_rate"], min_duration, max_duration):
             skipped += 1
             continue
 
-        spk = _sanitize_kaldi_id(ex.get("speaker_id") or f"spk{idx:06d}")
+        spk = _sanitize_kaldi_id(ex.get("speaker_id") or f"spk{rank:06d}")
         chapter = _sanitize_kaldi_id(ex.get("chapter_id") or "0")
         # Libri-style id: spk is already a prefix (Kaldi-friendly).
-        utt_id = f"{spk}-{chapter}-{idx:07d}"
+        utt_id = f"{spk}-{chapter}-{rank:07d}"
 
         wav_path = audio_dir / f"{utt_id}.wav"
         if not wav_path.exists():
