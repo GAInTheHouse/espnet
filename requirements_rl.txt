@@ -8,7 +8,9 @@ jiwer>=3.0.0
 google-generativeai>=0.5.0
 
 # HuggingFace data loading (AfriSpeech-200, VoxPopuli, LibriSpeech)
-datasets>=2.14.0
+# datasets 3.x dropped support for custom loading scripts (trust_remote_code).
+# AfriSpeech-200 still uses afrispeech-200.py, so we must stay on 2.x.
+datasets>=2.14.0,<3.0.0
 huggingface_hub>=0.20.0
 
 # Audio I/O for HF → kaldi WAV conversion
