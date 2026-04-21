@@ -138,6 +138,7 @@ def _iter_afrispeech(
     log.info("Loading tobiolatunji/afrispeech-200 split=%s ...", split)
     ds = hf_datasets.load_dataset(
         "tobiolatunji/afrispeech-200",
+        "all",           # required config name — loads all accents; we filter to clinical below
         split=split,
         trust_remote_code=True,
     )
