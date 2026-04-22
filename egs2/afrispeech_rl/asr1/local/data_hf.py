@@ -92,6 +92,21 @@ def _duration_ok(
     return min_duration <= duration <= max_duration
 
 
+def _sanitize_transcript(text: str) -> str:
+    """Strip non-printable characters from a transcript.
+
+    Kaldi's validate_data_dir.sh rejects text files containing non-printable
+    characters (control chars, zero-width spaces, BOM, etc.).  Keep only
+    printable ASCII (0x20–0x7E) so validation never fails on a bad unicode byte
+    embedded in a HuggingFace transcript field.
+    """
+    # Remove anything outside printable ASCII; preserve spaces and newlines
+    cleaned = re.sub(r"[^\x20-\x7E]", "", text)
+    # Collapse multiple spaces that may result from removal
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    return cleaned.strip()
+
+
 def _sanitize_kaldi_id(s) -> str:
     """Make a value safe for use as a Kaldi utterance / speaker ID.
 
@@ -173,7 +188,9 @@ def _iter_afrispeech(
         if not wav_path.exists():
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
-        transcript = str(ex.get("transcript", ex.get("text", ""))).strip().upper()
+        transcript = _sanitize_transcript(
+            str(ex.get("transcript", ex.get("text", ""))).upper()
+        )
         yield utt_id, spk, wav_path.resolve(), transcript
 
     if skipped:
@@ -224,9 +241,9 @@ def _iter_voxpopuli(
         if not wav_path.exists():
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
-        transcript = str(
-            ex.get("normalized_text", ex.get("raw_text", ""))
-        ).strip().upper()
+        transcript = _sanitize_transcript(
+            str(ex.get("normalized_text", ex.get("raw_text", ""))).upper()
+        )
         yield utt_id, spk, wav_path.resolve(), transcript
 
     if skipped:
@@ -279,7 +296,7 @@ def _iter_librispeech(
         if not wav_path.exists():
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
-        transcript = str(ex.get("text", "")).strip().upper()
+        transcript = _sanitize_transcript(str(ex.get("text", "")).upper())
         yield utt_id, spk, wav_path.resolve(), transcript
 
     if skipped:
