@@ -267,11 +267,24 @@ def _iter_librispeech(
     """
     import datasets as hf_datasets
 
-    log.info("Loading openslr/librispeech_asr split=%s (streaming) ...", split)
+    # openslr/librispeech_asr (clean config) split name mapping:
+    #   our name          -> HF split name
+    #   validation.clean  -> validation
+    #   train.clean.100   -> train.100
+    #   train.clean.360   -> train.360
+    #   test.clean        -> test
+    _LIBRI_SPLIT_MAP = {
+        "validation.clean": "validation",
+        "train.clean.100":  "train.100",
+        "train.clean.360":  "train.360",
+        "test.clean":       "test",
+    }
+    hf_split = _LIBRI_SPLIT_MAP.get(split, split)
+    log.info("Loading openslr/librispeech_asr split=%s (streaming) ...", hf_split)
     ds = hf_datasets.load_dataset(
         "openslr/librispeech_asr",
         "clean",
-        split=split,
+        split=hf_split,
         streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
