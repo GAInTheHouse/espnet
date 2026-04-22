@@ -18,5 +18,8 @@ soundfile>=0.12.0
 librosa>=0.10.0
 resampy>=0.4.2          # used by ESPnet's format_wav_scp.py for audio resampling
 
+# Edit distance (WER/CER computation inside ESPnet's error_calculator)
+editdistance>=0.6.0
+
 # LoRA (uses ESPnet2's built-in loralib integration)
 loralib>=0.1.2
