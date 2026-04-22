@@ -76,6 +76,12 @@ seed=42                      # NeMo seed=42
 # LoRA (optional)
 use_lora=false
 
+# Smoke test mode: limits training to a tiny number of batches per epoch so
+# the full pipeline (data → SFT → RL → decode → eval) completes in ~5 minutes.
+# Usage: bash run.sh --smoke_test true
+# Sets: max_epoch=1, num_iters_per_epoch=20 for both SFT and RL stages.
+smoke_test=false
+
 # Feature settings
 feats_type=raw
 audio_format=wav
@@ -118,6 +124,13 @@ domain_terms_opts=""
 if [ -n "${domain_terms}" ]; then
     # shellcheck disable=SC2086
     domain_terms_opts="--domain_terms ${domain_terms}"
+fi
+
+# Build smoke-test overrides: 1 epoch, 20 batches — full pipeline in ~5 min
+smoke_test_opts=""
+if [ "${smoke_test}" = true ]; then
+    smoke_test_opts="--max_epoch 1 --num_iters_per_epoch 20"
+    log "SMOKE TEST MODE: max_epoch=1, num_iters_per_epoch=20"
 fi
 
 # Build optional Gemini key flag
@@ -288,7 +301,8 @@ print(info.get('bpemodel',''))
             --output_dir "${sft_expdir}" \
             --rl_weight 0.0 \
             --seed "${seed}" \
-            ${lora_opts}
+            ${lora_opts} \
+            ${smoke_test_opts}
     log "SFT checkpoint: ${sft_expdir}/valid.loss.best.pth"
 fi
 
@@ -343,7 +357,8 @@ print(info.get('bpemodel',''))
             --seed "${seed}" \
             ${domain_terms_opts} \
             ${gemini_opts} \
-            ${lora_opts}
+            ${lora_opts} \
+            ${smoke_test_opts}
     log "RL checkpoint: ${rl_expdir}/valid.loss.best.pth"
 fi
 
