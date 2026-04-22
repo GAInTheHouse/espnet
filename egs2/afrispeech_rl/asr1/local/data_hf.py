@@ -152,11 +152,13 @@ def _iter_afrispeech(
     """
     import datasets as hf_datasets
 
-    log.info("Loading tobiolatunji/afrispeech-200 split=%s (streaming) ...", split)
+    # AfriSpeech-200 uses 'validation' not 'dev' as the HF split name.
+    hf_split = "validation" if split == "dev" else split
+    log.info("Loading tobiolatunji/afrispeech-200 split=%s (streaming) ...", hf_split)
     ds = hf_datasets.load_dataset(
         "tobiolatunji/afrispeech-200",
         "all",           # config name — loads all accents; filtered to clinical below
-        split=split,
+        split=hf_split,
         streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
