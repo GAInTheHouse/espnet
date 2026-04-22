@@ -92,21 +92,6 @@ def _duration_ok(
     return min_duration <= duration <= max_duration
 
 
-def _sanitize_transcript(text: str) -> str:
-    """Strip non-printable characters from a transcript.
-
-    Kaldi's validate_data_dir.sh rejects text files containing non-printable
-    characters (control chars, zero-width spaces, BOM, etc.).  Keep only
-    printable ASCII (0x20–0x7E) so validation never fails on a bad unicode byte
-    embedded in a HuggingFace transcript field.
-    """
-    # Remove anything outside printable ASCII; preserve spaces and newlines
-    cleaned = re.sub(r"[^\x20-\x7E]", "", text)
-    # Collapse multiple spaces that may result from removal
-    cleaned = re.sub(r" {2,}", " ", cleaned)
-    return cleaned.strip()
-
-
 def _sanitize_kaldi_id(s) -> str:
     """Make a value safe for use as a Kaldi utterance / speaker ID.
 
@@ -152,13 +137,11 @@ def _iter_afrispeech(
     """
     import datasets as hf_datasets
 
-    # AfriSpeech-200 uses 'validation' not 'dev' as the HF split name.
-    hf_split = "validation" if split == "dev" else split
-    log.info("Loading tobiolatunji/afrispeech-200 split=%s (streaming) ...", hf_split)
+    log.info("Loading tobiolatunji/afrispeech-200 split=%s (streaming) ...", split)
     ds = hf_datasets.load_dataset(
         "tobiolatunji/afrispeech-200",
         "all",           # config name — loads all accents; filtered to clinical below
-        split=hf_split,
+        split=split,
         streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
@@ -190,9 +173,7 @@ def _iter_afrispeech(
         if not wav_path.exists():
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
-        transcript = _sanitize_transcript(
-            str(ex.get("transcript", ex.get("text", ""))).upper()
-        )
+        transcript = str(ex.get("transcript", ex.get("text", ""))).strip().upper()
         yield utt_id, spk, wav_path.resolve(), transcript
 
     if skipped:
@@ -243,9 +224,9 @@ def _iter_voxpopuli(
         if not wav_path.exists():
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
-        transcript = _sanitize_transcript(
-            str(ex.get("normalized_text", ex.get("raw_text", ""))).upper()
-        )
+        transcript = str(
+            ex.get("normalized_text", ex.get("raw_text", ""))
+        ).strip().upper()
         yield utt_id, spk, wav_path.resolve(), transcript
 
     if skipped:
@@ -267,24 +248,11 @@ def _iter_librispeech(
     """
     import datasets as hf_datasets
 
-    # openslr/librispeech_asr (clean config) split name mapping:
-    #   our name          -> HF split name
-    #   validation.clean  -> validation
-    #   train.clean.100   -> train.100
-    #   train.clean.360   -> train.360
-    #   test.clean        -> test
-    _LIBRI_SPLIT_MAP = {
-        "validation.clean": "validation",
-        "train.clean.100":  "train.100",
-        "train.clean.360":  "train.360",
-        "test.clean":       "test",
-    }
-    hf_split = _LIBRI_SPLIT_MAP.get(split, split)
-    log.info("Loading openslr/librispeech_asr split=%s (streaming) ...", hf_split)
+    log.info("Loading openslr/librispeech_asr split=%s (streaming) ...", split)
     ds = hf_datasets.load_dataset(
         "openslr/librispeech_asr",
         "clean",
-        split=hf_split,
+        split=split,
         streaming=True,  # stream one example at a time; no HF disk cache written
         trust_remote_code=True,
     )
@@ -311,7 +279,7 @@ def _iter_librispeech(
         if not wav_path.exists():
             _save_wav(audio["array"], audio["sampling_rate"], wav_path)
 
-        transcript = _sanitize_transcript(str(ex.get("text", "")).upper())
+        transcript = str(ex.get("text", "")).strip().upper()
         yield utt_id, spk, wav_path.resolve(), transcript
 
     if skipped:
@@ -321,6 +289,20 @@ def _iter_librispeech(
 # ---------------------------------------------------------------------------
 # Kaldi directory writer
 # ---------------------------------------------------------------------------
+
+
+def _sanitize_transcript(text: str) -> str:
+    """Remove characters that Kaldi's validate_data_dir.sh rejects.
+
+    Kaldi flags any line containing non-printable / non-ASCII bytes.
+    We keep printable ASCII only, collapse runs of whitespace, and strip
+    leading/trailing spaces.  The result is safe for Kaldi text files.
+    """
+    # Strip non-printable characters (control chars, null bytes, etc.)
+    cleaned = "".join(ch for ch in text if ch.isprintable())
+    # Collapse internal whitespace runs to a single space
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip()
 
 
 def write_kaldi_dir(
@@ -338,8 +320,9 @@ def write_kaldi_dir(
     rows: List[Tuple[str, str, pathlib.Path, str]] = []
     count = 0
     for utt_id, spk, wav_path, transcript in iterator:
+        transcript = _sanitize_transcript(transcript)
         if not transcript:
-            log.debug("Skipping %s: empty transcript", utt_id)
+            log.debug("Skipping %s: empty transcript after sanitisation", utt_id)
             continue
         rows.append((utt_id, spk, wav_path, transcript))
         count += 1
