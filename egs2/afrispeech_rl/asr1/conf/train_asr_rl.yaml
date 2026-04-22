@@ -58,10 +58,10 @@ scheduler_conf:
   warmup_steps: 500
 max_epoch: 2
 batch_type: numel
-batch_bins: 4000000
-accum_grad: 2
+batch_bins: 600000         # FP32 (use_amp=false) needs smaller batches; ~half of SFT
+accum_grad: 8              # effective batch kept similar via accumulation
 grad_clip: 1.0
-use_amp: false
+use_amp: false             # FP32 for RL stage — NeMo FORCE_FP32=true; reward stability
 num_workers: 4
 seed: 42
 rl_weight: 0.02

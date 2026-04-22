@@ -22,3 +22,6 @@ fi
 export OMP_NUM_THREADS=1
 export PYTHONIOENCODING=UTF-8
 export NCCL_SOCKET_IFNAME="^lo,docker,virbr,vmnet,vboxnet"
+
+# Reduce CUDA allocator fragmentation (recommended by PyTorch for OOM errors)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

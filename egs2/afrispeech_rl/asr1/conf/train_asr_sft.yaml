@@ -65,10 +65,10 @@ scheduler_conf:
   warmup_steps: 2000
 max_epoch: 5
 batch_type: numel
-batch_bins: 4000000
-accum_grad: 2
+batch_bins: 1200000        # reduced from 4000000; fits T4 (14.56 GiB) with AMP
+accum_grad: 8              # increased from 2; effective batch stays ~same (1.2M x 8 ≈ 4M x 2)
 grad_clip: 5.0
-use_amp: false
+use_amp: true              # FP16 mixed precision for SFT; halves GPU memory vs FP32
 num_workers: 4
 seed: 42
 rl_weight: 0.0
