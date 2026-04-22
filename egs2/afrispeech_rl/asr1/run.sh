@@ -15,6 +15,7 @@
 #   bash run.sh --reward_mode wwer --reward_loss_type reinforce
 #   bash run.sh --use_lora true --ngpu 1
 #   bash run.sh --stage 6 --stop_stage 6   # re-run RL stage only
+#   bash run.sh --smoke_test true          # tiny train + ≤10 utts/decode + fast bootstrap
 #
 # Prerequisites
 # -------------
@@ -81,7 +82,9 @@ use_lora=false
 # Usage: bash run.sh --smoke_test true
 #        bash run.sh --smoke_test   # same as true (parse_options needs a value)
 # Sets: max_epoch=1, num_iters_per_epoch=20 for both SFT and RL stages.
+# Stage 8 (decode): only first smoke_decode_n utterances per test set (full sets otherwise).
 smoke_test=false
+smoke_decode_n=10
 
 # Feature settings
 feats_type=raw
@@ -152,7 +155,7 @@ fi
 smoke_test_opts=""
 if [ "${smoke_test}" = true ]; then
     smoke_test_opts="--max_epoch 1 --num_iters_per_epoch 20"
-    log "SMOKE TEST MODE: max_epoch=1, num_iters_per_epoch=20"
+    log "SMOKE TEST MODE: max_epoch=1, num_iters_per_epoch=20, decode ≤${smoke_decode_n} utts/set, bootstrap_iters=32"
 fi
 
 # Build optional Gemini key flag
@@ -403,7 +406,12 @@ print(info.get('token_list',''))
         for test_set in ${test_sets} ${forgetting_set}; do
             decode_dir="${expdir}/decode_${test_set}"
             mkdir -p "${decode_dir}/logdir"
-            cp "dump/raw/${test_set}/wav.scp" "${decode_dir}/logdir/keys.1.scp"
+            if [ "${smoke_test}" = true ]; then
+                head -n "${smoke_decode_n}" "dump/raw/${test_set}/wav.scp" \
+                    > "${decode_dir}/logdir/keys.1.scp"
+            else
+                cp "dump/raw/${test_set}/wav.scp" "${decode_dir}/logdir/keys.1.scp"
+            fi
 
             log "  Decoding ${test_set} with ${model_tag} ..."
             ${decode_cmd} "${decode_dir}/logdir/decode.log" \
@@ -451,11 +459,16 @@ PYEOF
                     [ -f "${sft_hyp}" ] && baseline_arg="--baseline_hyp_file ${sft_hyp}"
                 fi
 
+                bootstrap_iters=1000
+                if [ "${smoke_test}" = true ]; then
+                    bootstrap_iters=32
+                fi
+
                 python3 local/eval_extended.py \
                     --hyp_file "${hyp_text}" \
                     --ref_file "${ref_text}" \
                     --domain_terms_file conf/domain_terms_clinical.txt \
-                    --bootstrap_iters 1000 \
+                    --bootstrap_iters "${bootstrap_iters}" \
                     --output_json "${decode_dir}/extended_metrics.json" \
                     ${baseline_arg} \
                     || log "WARNING: eval_extended.py failed for ${model_tag} / ${test_set}"
