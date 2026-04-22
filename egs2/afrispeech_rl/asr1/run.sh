@@ -79,6 +79,7 @@ use_lora=false
 # Smoke test mode: limits training to a tiny number of batches per epoch so
 # the full pipeline (data → SFT → RL → decode → eval) completes in ~5 minutes.
 # Usage: bash run.sh --smoke_test true
+#        bash run.sh --smoke_test   # same as true (parse_options needs a value)
 # Sets: max_epoch=1, num_iters_per_epoch=20 for both SFT and RL stages.
 smoke_test=false
 
@@ -88,6 +89,27 @@ audio_format=wav
 fs=16k
 
 log "$0 $*"
+# Kaldi utils/parse_options.sh always expects --option value.  Bare --smoke_test
+# would leave $2 unset and fail under set -u; default the value to true.
+_rebuilt_args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --smoke_test)
+            if [ $# -ge 2 ] && [[ "$2" != --* ]]; then
+                _rebuilt_args+=("$1" "$2")
+                shift 2
+            else
+                _rebuilt_args+=("$1" "true")
+                shift
+            fi
+            ;;
+        *)
+            _rebuilt_args+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${_rebuilt_args[@]}"
 . utils/parse_options.sh
 . ./path.sh
 . ./cmd.sh
