@@ -16,6 +16,7 @@ huggingface_hub>=0.20.0
 # Audio I/O for HF → kaldi WAV conversion
 soundfile>=0.12.0
 librosa>=0.10.0
+resampy>=0.4.2          # used by ESPnet's format_wav_scp.py for audio resampling
 
 # LoRA (uses ESPnet2's built-in loralib integration)
 loralib>=0.1.2
