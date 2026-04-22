@@ -217,6 +217,16 @@ fi
 # ---------------------------------------------------------------------------
 if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     log "=== Stage 4: Collecting statistics (shape files for batch sampler) ==="
+    # Guard: dump/raw must exist (created by Stage 2). If missing, Stage 2 did
+    # not run or failed — rerun with --stage 2 --stop_stage 2 first.
+    for _set in "${train_set}" "${valid_set}"; do
+        if [ ! -f "dump/raw/${_set}/wav.scp" ]; then
+            log "ERROR: dump/raw/${_set}/wav.scp not found."
+            log "       Stage 2 (feature formatting) must run before Stage 4."
+            log "       Fix: bash run.sh --stage 2 --stop_stage 2 --ngpu ${ngpu}"
+            exit 1
+        fi
+    done
     # asr.sh stage 10 (collect_stats) cannot parse rl_weight from the config.
     # Generate speech_shape and text_shape.bpe directly.
     python3 - <<PYEOF
