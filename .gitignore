@@ -128,3 +128,6 @@ tools/condarc
 tools/lightning_constraints.txt
 tools/versa
 tools/ParallelWaveGAN
+
+results/
+nemo-docs/
