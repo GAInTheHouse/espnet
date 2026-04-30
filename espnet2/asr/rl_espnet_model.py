@@ -94,10 +94,37 @@ except ImportError:
     _genai = None
     _HAS_GENAI = False
 
+try:
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        BitsAndBytesConfig,
+    )
+
+    _HAS_TRANSFORMERS = True
+except ImportError:
+    AutoModelForCausalLM = None  # type: ignore[assignment,misc]
+    AutoTokenizer = None  # type: ignore[assignment]
+    BitsAndBytesConfig = None  # type: ignore[assignment]
+    _HAS_TRANSFORMERS = False
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (picklable across DataLoader workers)
 # ---------------------------------------------------------------------------
+
+
+def _derive_domain_tag(model_id: str) -> str:
+    """Infer a domain label from a HuggingFace model-id string.
+
+    Used to embed a domain hint in the LLM scoring prompt.
+    """
+    name = model_id.lower()
+    if any(k in name for k in ("med", "health", "clinical", "pharma", "bio")):
+        return "medical"
+    if any(k in name for k in ("legal", "law", "juris", "court", "statute")):
+        return "legal"
+    return "general"
 
 
 def _ctc_greedy_decode(
@@ -243,6 +270,12 @@ class RLESPnetModel(ESPnetASRModel):
             Falls back to mock (mwer + noise) if None or if API call fails.
         mock_llm: Force mock LLM path even when ``gemini_api_key`` is set.
             Useful for smoke-testing without billing.
+        llm_reward_model: HuggingFace model-id for local 4-bit inference
+            (e.g. ``microsoft/MediPhi``, ``google/medgemma-4b-it``).  When
+            non-empty this path takes priority over the Gemini API.  Requires
+            ``transformers`` and ``bitsandbytes`` to be installed.  The model
+            is loaded once at construction time with 4-bit NF4 quantization so
+            it fits on a 16 GB T4 GPU.
         All other args are forwarded verbatim to ``ESPnetASRModel.__init__``.
     """
 
@@ -256,6 +289,7 @@ class RLESPnetModel(ESPnetASRModel):
         max_encoder_len_for_reward: int = 1500,
         gemini_api_key: Optional[str] = None,
         mock_llm: bool = False,
+        llm_reward_model: str = "",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -267,6 +301,50 @@ class RLESPnetModel(ESPnetASRModel):
         self.max_encoder_len_for_reward = max_encoder_len_for_reward
         self.gemini_api_key = gemini_api_key or ""
         self.mock_llm = mock_llm
+        self.llm_reward_model = llm_reward_model
+
+        # Local HuggingFace LLM for reward scoring (loaded on first use).
+        # 4-bit NF4 quantization — fits ~3.8–4 B params on a 16 GB T4.
+        self._hf_tokenizer = None
+        self._hf_llm = None
+        if llm_reward_model:
+            if not _HAS_TRANSFORMERS:
+                logging.warning(
+                    "llm_reward_model=%s requested but 'transformers' is not "
+                    "installed. Falling back to Gemini / mock path.",
+                    llm_reward_model,
+                )
+            else:
+                try:
+                    logging.info(
+                        "Loading local LLM reward model: %s (4-bit quantized)",
+                        llm_reward_model,
+                    )
+                    bnb_cfg = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                    )
+                    self._hf_tokenizer = AutoTokenizer.from_pretrained(
+                        llm_reward_model
+                    )
+                    self._hf_llm = AutoModelForCausalLM.from_pretrained(
+                        llm_reward_model,
+                        quantization_config=bnb_cfg,
+                        device_map="auto",
+                    )
+                    self._hf_llm.eval()
+                    logging.info("Local LLM reward model loaded: %s", llm_reward_model)
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to load llm_reward_model=%s (%s). "
+                        "Falling back to Gemini / mock path.",
+                        llm_reward_model,
+                        exc,
+                    )
+                    self._hf_tokenizer = None
+                    self._hf_llm = None
+
+        self._llm_domain_tag: str = _derive_domain_tag(llm_reward_model)
 
         # Cached neutral reward (0.5), updated each time reward is computed.
         # Registered as a buffer so it moves with the model to the right device.
@@ -639,20 +717,25 @@ class RLESPnetModel(ESPnetASRModel):
         api_key: str,
         use_mock: bool,
     ) -> torch.Tensor:
-        """Gemini-1.5-flash quality score [0, 1] per utterance.
+        """LLM quality score [0, 1] per utterance.
 
-        Falls back to mwer + Gaussian noise (mock path) when:
+        Inference priority (first available wins):
+        1. Local HuggingFace 4-bit model (``self._hf_llm``), when loaded.
+        2. Gemini-1.5-flash API (``api_key`` non-empty, ``use_mock=False``).
+        3. Mock path: mwer + Gaussian noise, clamped to [0, 1].
+
+        The mock path activates when:
         - ``use_mock=True`` (smoke-test mode)
-        - ``api_key`` is empty or not provided
-        - ``google-generativeai`` is not installed
-        - The Gemini API call raises any exception
+        - No local model and no Gemini key available
+        - Any inference call raises an exception
         """
         if not _HAS_JIWER:
             raise RuntimeError("jiwer required even for llm reward (mock fallback).")
 
         rewards: List[float] = []
 
-        can_use_live = _HAS_GENAI and bool(api_key) and not use_mock
+        can_use_hf = self._hf_llm is not None and not use_mock
+        can_use_gemini = _HAS_GENAI and bool(api_key) and not use_mock
 
         for hyp, ref in zip(hypotheses, references):
             if not ref.strip():
@@ -660,22 +743,68 @@ class RLESPnetModel(ESPnetASRModel):
                 continue
 
             score: Optional[float] = None
+            hyp_str = hyp if hyp.strip() else "<empty>"
 
-            if can_use_live:
+            # --- Path 1: local HuggingFace model ---
+            if can_use_hf and score is None:
                 try:
-                    _genai.configure(api_key=api_key)
-                    model = _genai.GenerativeModel("gemini-1.5-flash")
+                    domain_hint = (
+                        f"Domain context: {self._llm_domain_tag}. "
+                        if self._llm_domain_tag != "general"
+                        else ""
+                    )
                     prompt = (
+                        f"{domain_hint}"
                         "You are evaluating an automatic speech recognition (ASR) hypothesis.\n"
                         f'Reference: "{ref}"\n'
-                        f'Hypothesis: "{hyp if hyp.strip() else "<empty>"}"\n'
+                        f'Hypothesis: "{hyp_str}"\n'
                         "Rate how closely the hypothesis matches the reference on a scale "
                         "from 0.0 (completely wrong) to 1.0 (perfect match).\n"
                         "Consider word accuracy, domain-specific term correctness, and "
                         "overall meaning preservation.\n"
                         "Reply with a single decimal number between 0.0 and 1.0 only."
                     )
-                    response = model.generate_content(prompt)
+                    inputs = self._hf_tokenizer(
+                        prompt, return_tensors="pt", truncation=True, max_length=512
+                    ).to(next(self._hf_llm.parameters()).device)
+                    with torch.no_grad():
+                        out = self._hf_llm.generate(
+                            **inputs,
+                            max_new_tokens=8,
+                            do_sample=False,
+                            pad_token_id=self._hf_tokenizer.eos_token_id,
+                        )
+                    generated = self._hf_tokenizer.decode(
+                        out[0][inputs["input_ids"].shape[1]:],
+                        skip_special_tokens=True,
+                    ).strip()
+                    # Extract the first float-like token from the response
+                    import re as _re
+                    m = _re.search(r"[0-9]+(?:\.[0-9]+)?", generated)
+                    if m:
+                        score = max(0.0, min(1.0, float(m.group())))
+                except Exception as exc:
+                    logging.warning(
+                        "Local HF LLM inference failed (%s); trying next path.", exc
+                    )
+                    score = None
+
+            # --- Path 2: Gemini API ---
+            if can_use_gemini and score is None:
+                try:
+                    _genai.configure(api_key=api_key)
+                    gemini_model = _genai.GenerativeModel("gemini-1.5-flash")
+                    prompt = (
+                        "You are evaluating an automatic speech recognition (ASR) hypothesis.\n"
+                        f'Reference: "{ref}"\n'
+                        f'Hypothesis: "{hyp_str}"\n'
+                        "Rate how closely the hypothesis matches the reference on a scale "
+                        "from 0.0 (completely wrong) to 1.0 (perfect match).\n"
+                        "Consider word accuracy, domain-specific term correctness, and "
+                        "overall meaning preservation.\n"
+                        "Reply with a single decimal number between 0.0 and 1.0 only."
+                    )
+                    response = gemini_model.generate_content(prompt)
                     score = float(response.text.strip())
                     score = max(0.0, min(1.0, score))
                 except Exception as exc:
@@ -684,10 +813,10 @@ class RLESPnetModel(ESPnetASRModel):
                     )
                     score = None
 
+            # --- Path 3: mock (mwer + Gaussian noise) ---
             if score is None:
-                # Mock path: mwer + small Gaussian noise, clamped to [0, 1]
                 try:
-                    wer = _jiwer.wer(ref, hyp if hyp.strip() else "<empty>")
+                    wer = _jiwer.wer(ref, hyp_str)
                     base = max(0.0, 1.0 - wer)
                 except Exception:
                     base = 0.5

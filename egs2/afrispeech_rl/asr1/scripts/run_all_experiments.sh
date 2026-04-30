@@ -18,7 +18,7 @@
 set -euo pipefail
 
 START_STEP="${START_STEP:-1}"
-STOP_STEP="${STOP_STEP:-19}"
+STOP_STEP="${STOP_STEP:-28}"
 
 LOGDIR="logs/run_all_experiments"
 mkdir -p "${LOGDIR}"
@@ -352,8 +352,132 @@ if skip_if_before ${STEP}; then
 fi
 
 # ============================================================
-# Steps 20–28 added by Phase C (scripts/run_all_experiments.sh C.4)
+# Steps 20–22: AfriSpeech + MedPhi (microsoft/MediPhi), seeds 42 / 33 / 0
+# SFT checkpoints reused from earlier runs (Stage 7 only).
+# Seed=42 uses exp/asr_sft (existing baseline checkpoint, no suffix).
 # ============================================================
+STEP=20
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "AfriSpeech × MedPhi Seed=42 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 42 \
+        --sft_expdir exp/asr_sft \
+        --rl_expdir  exp/asr_rl_llm_medphi_s42 \
+        --rl_config  conf/train_asr_rl_llm_medphi.yaml \
+        --test_sets  "afrispeech_dev afrispeech_test librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+STEP=21
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "AfriSpeech × MedPhi Seed=33 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 33 \
+        --sft_expdir exp/asr_sft_s33 \
+        --rl_expdir  exp/asr_rl_llm_medphi_s33 \
+        --rl_config  conf/train_asr_rl_llm_medphi.yaml \
+        --test_sets  "afrispeech_dev afrispeech_test librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+STEP=22
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "AfriSpeech × MedPhi Seed=0 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 0 \
+        --sft_expdir exp/asr_sft_s0 \
+        --rl_expdir  exp/asr_rl_llm_medphi_s0 \
+        --rl_config  conf/train_asr_rl_llm_medphi.yaml \
+        --test_sets  "afrispeech_dev afrispeech_test librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+# ============================================================
+# Steps 23–25: AfriSpeech + MedGemma (google/medgemma-4b-it), seeds 42 / 33 / 0
+# ============================================================
+STEP=23
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "AfriSpeech × MedGemma Seed=42 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 42 \
+        --sft_expdir exp/asr_sft \
+        --rl_expdir  exp/asr_rl_llm_medgemma_s42 \
+        --rl_config  conf/train_asr_rl_llm_medgemma.yaml \
+        --test_sets  "afrispeech_dev afrispeech_test librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+STEP=24
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "AfriSpeech × MedGemma Seed=33 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 33 \
+        --sft_expdir exp/asr_sft_s33 \
+        --rl_expdir  exp/asr_rl_llm_medgemma_s33 \
+        --rl_config  conf/train_asr_rl_llm_medgemma.yaml \
+        --test_sets  "afrispeech_dev afrispeech_test librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+STEP=25
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "AfriSpeech × MedGemma Seed=0 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 0 \
+        --sft_expdir exp/asr_sft_s0 \
+        --rl_expdir  exp/asr_rl_llm_medgemma_s0 \
+        --rl_config  conf/train_asr_rl_llm_medgemma.yaml \
+        --test_sets  "afrispeech_dev afrispeech_test librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+# ============================================================
+# Steps 26–28: VoxPopuli + Phi3-Legal (sairamn/Phi3-Legal-Finetuned), seeds 42 / 33 / 0
+# ============================================================
+STEP=26
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "VoxPopuli × Phi3-Legal Seed=42 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 42 \
+        --train_set     voxpopuli_train \
+        --valid_set     voxpopuli_dev \
+        --asr_stats_dir exp/vox_stats_raw_bpe5000 \
+        --sft_expdir    exp/vox_sft_s42 \
+        --rl_expdir     exp/vox_rl_llm_philegal_s42 \
+        --rl_config     conf/train_asr_rl_llm_philegal.yaml \
+        --test_sets     "voxpopuli_dev librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+STEP=27
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "VoxPopuli × Phi3-Legal Seed=33 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 33 \
+        --train_set     voxpopuli_train \
+        --valid_set     voxpopuli_dev \
+        --asr_stats_dir exp/vox_stats_raw_bpe5000 \
+        --sft_expdir    exp/vox_sft_s33 \
+        --rl_expdir     exp/vox_rl_llm_philegal_s33 \
+        --rl_config     conf/train_asr_rl_llm_philegal.yaml \
+        --test_sets     "voxpopuli_dev librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
+
+STEP=28
+if skip_if_before ${STEP}; then
+    log_step ${STEP} "VoxPopuli × Phi3-Legal Seed=0 — Stage 7+8 LLM RL"
+    bash run.sh --stage 7 --stop_stage 8 --ngpu 1 --seed 0 \
+        --train_set     voxpopuli_train \
+        --valid_set     voxpopuli_dev \
+        --asr_stats_dir exp/vox_stats_raw_bpe5000 \
+        --sft_expdir    exp/vox_sft_s0 \
+        --rl_expdir     exp/vox_rl_llm_philegal_s0 \
+        --rl_config     conf/train_asr_rl_llm_philegal.yaml \
+        --test_sets     "voxpopuli_dev librispeech_dev_clean" \
+        2>&1 | tee "${LOGDIR}/step${STEP}.log"
+    finish_step ${STEP}
+fi
 
 echo ""
 echo "============================================================"

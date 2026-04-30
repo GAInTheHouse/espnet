@@ -1,0 +1,125 @@
+normalize: global_mvn
+normalize_conf:
+  stats_file: /opt/homebrew/anaconda3/envs/espnet_rl/lib/python3.10/site-packages/espnet_model_zoo/models--pyf98--librispeech_conformer/blobs/f7db198971ff67721e6accdb8cecd03e9674675c
+encoder: conformer
+encoder_conf:
+  output_size: 512
+  attention_heads: 8
+  linear_units: 2048
+  num_blocks: 12
+  dropout_rate: 0.1
+  positional_dropout_rate: 0.1
+  attention_dropout_rate: 0.1
+  input_layer: conv2d
+  normalize_before: true
+  macaron_style: true
+  pos_enc_layer_type: rel_pos
+  selfattention_layer_type: rel_selfattn
+  activation_type: swish
+  use_cnn_module: true
+  cnn_module_kernel: 31
+decoder: transformer
+decoder_conf:
+  attention_heads: 8
+  linear_units: 2048
+  num_blocks: 6
+  dropout_rate: 0.1
+  positional_dropout_rate: 0.1
+  self_attention_dropout_rate: 0.1
+  src_attention_dropout_rate: 0.1
+model_conf:
+  ctc_weight: 0.3
+  lsm_weight: 0.1
+  length_normalized_loss: false
+specaug: specaug
+specaug_conf:
+  apply_time_warp: true
+  time_warp_window: 5
+  apply_time_mask: true
+  time_mask_width_ratio_range:
+  - 0.0
+  - 0.05
+  num_time_mask: 5
+  apply_freq_mask: true
+  freq_mask_width_range:
+  - 0
+  - 30
+  num_freq_mask: 2
+optim: adamw
+optim_conf:
+  lr: 1.0e-05
+  betas:
+  - 0.9
+  - 0.98
+  weight_decay: 0.001
+  eps: 1.0e-08
+scheduler: warmuplr
+scheduler_conf:
+  warmup_steps: 500
+max_epoch: 3
+batch_type: numel
+batch_bins: 600000         # FP32 (use_amp=false) needs smaller batches; ~half of SFT
+accum_grad: 8              # effective batch kept similar via accumulation
+grad_clip: 1.0
+use_amp: false             # FP32 for RL stage — NeMo FORCE_FP32=true; reward stability
+num_workers: 4
+seed: 42
+rl_weight: 0.02
+reward_mode: llm
+llm_reward_model: microsoft/MediPhi
+reward_loss_type: reweight_ctc
+reward_step_interval: 4
+max_encoder_len_for_reward: 1500
+domain_term_weight: 3.0
+domain_terms:
+- patient
+- hypertension
+- malaria
+- diabetes
+- medication
+- surgery
+- diagnosis
+- treatment
+- hospital
+- clinic
+- prescription
+- infection
+- antibiotic
+- dosage
+- symptom
+- fever
+- blood
+- pressure
+- chronic
+- acute
+- cardiac
+- respiratory
+- pulmonary
+- anemia
+- tuberculosis
+- hiv
+- antiretroviral
+- pregnancy
+- prenatal
+- neonatal
+- cholesterol
+- kidney
+- liver
+- cancer
+- arthritis
+- asthma
+- epilepsy
+gemini_api_key: ''
+mock_llm: false
+use_adapter: false
+adapter: lora
+adapter_conf:
+  rank: 8
+  alpha: 16
+  target_modules:
+  - linear_q
+  - linear_k
+  - linear_v
+  - linear_out
+  - w_1
+  - w_2
