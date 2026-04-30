@@ -62,8 +62,8 @@ optim_conf:
   eps: 1.0e-08
 scheduler: warmuplr
 scheduler_conf:
-  warmup_steps: 2000
-max_epoch: 5
+  warmup_steps: 300        # 10% of ~3300 total optimizer steps (660 steps/epoch × 5 epochs)
+max_epoch: 10
 batch_type: numel
 batch_bins: 1200000        # reduced from 4000000; fits T4 (14.56 GiB) with AMP
 accum_grad: 8              # increased from 2; effective batch stays ~same (1.2M x 8 ≈ 4M x 2)

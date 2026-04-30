@@ -56,7 +56,7 @@ optim_conf:
 scheduler: warmuplr
 scheduler_conf:
   warmup_steps: 500
-max_epoch: 2
+max_epoch: 3
 batch_type: numel
 batch_bins: 600000         # FP32 (use_amp=false) needs smaller batches; ~half of SFT
 accum_grad: 8              # effective batch kept similar via accumulation
