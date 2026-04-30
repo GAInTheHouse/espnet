@@ -68,8 +68,6 @@ decode_config="conf/decode_asr.yaml"
 # RL options (override via CLI)
 reward_mode="mwer"           # mwer | wwer | llm | all
 reward_loss_type="penalty"   # penalty (NeMo default) | reinforce
-gemini_api_key="${GEMINI_API_KEY:-}"
-mock_llm=false
 domain_terms=""              # space-separated list, e.g. "hypertension arrhythmia"
 
 # Reproducibility
@@ -159,14 +157,6 @@ if [ "${smoke_test}" = true ]; then
     log "SMOKE TEST MODE: max_epoch=1, num_iters_per_epoch=20, decode ≤${smoke_decode_n} utts/set, bootstrap_iters=32"
 fi
 
-# Build optional Gemini key flag
-gemini_opts=""
-if [ -n "${gemini_api_key}" ]; then
-    gemini_opts="--gemini_api_key ${gemini_api_key}"
-fi
-if [ "${mock_llm}" = true ]; then
-    gemini_opts="${gemini_opts} --mock_llm true"
-fi
 
 # ---------------------------------------------------------------------------
 # Stage 1: Data preparation (HuggingFace download → kaldi dirs)
@@ -388,7 +378,6 @@ print(info.get('bpemodel',''))
             --reward_loss_type "${reward_loss_type}" \
             --seed "${seed}" \
             ${domain_terms_opts} \
-            ${gemini_opts} \
             ${lora_opts} \
             ${smoke_test_opts}
     log "RL checkpoint: ${rl_expdir}/valid.loss.best.pth"

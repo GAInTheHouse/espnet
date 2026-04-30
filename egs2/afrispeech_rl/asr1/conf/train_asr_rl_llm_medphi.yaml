@@ -109,8 +109,6 @@ domain_terms:
 - arthritis
 - asthma
 - epilepsy
-gemini_api_key: ''
-mock_llm: false
 use_adapter: false
 adapter: lora
 adapter_conf:

@@ -40,7 +40,7 @@ Reward modes (``reward_mode``)
 ------------------------------
 mwer   Standard WER-based reward:  reward = clip(1 - WER(ref, hyp), 0, 1).
 wwer   Domain-weighted WER:  domain terms incur ``domain_term_weight`` × normal cost.
-llm    Gemini-1.5-flash quality score [0, 1]; mock fallback = mwer + N(0, 0.05).
+llm    Local HuggingFace 4-bit LLM quality score [0, 1]; mock fallback = mwer + N(0, 0.05).
 all    Element-wise mean of mwer, wwer, and llm reward tensors.
 
 GPU notes
@@ -85,14 +85,6 @@ except ImportError:
         "jiwer is not installed. RL reward computation will be disabled. "
         "Install with: pip install jiwer"
     )
-
-try:
-    import google.generativeai as _genai
-
-    _HAS_GENAI = True
-except ImportError:
-    _genai = None
-    _HAS_GENAI = False
 
 try:
     from transformers import (
@@ -266,10 +258,6 @@ class RLESPnetModel(ESPnetASRModel):
         domain_term_weight: Edit-cost multiplier for domain terms (default 3.0).
         max_encoder_len_for_reward: Skip reward computation for utterances
             whose encoder output exceeds this frame count (GPU memory guard).
-        gemini_api_key: Gemini API key for the ``llm`` reward mode.
-            Falls back to mock (mwer + noise) if None or if API call fails.
-        mock_llm: Force mock LLM path even when ``gemini_api_key`` is set.
-            Useful for smoke-testing without billing.
         llm_reward_model: HuggingFace model-id for local 4-bit inference
             (e.g. ``microsoft/MediPhi``, ``google/medgemma-4b-it``).  When
             non-empty this path takes priority over the Gemini API.  Requires
@@ -287,8 +275,6 @@ class RLESPnetModel(ESPnetASRModel):
         domain_terms: Optional[List[str]] = None,
         domain_term_weight: float = 3.0,
         max_encoder_len_for_reward: int = 1500,
-        gemini_api_key: Optional[str] = None,
-        mock_llm: bool = False,
         llm_reward_model: str = "",
         **kwargs,
     ):
@@ -299,8 +285,6 @@ class RLESPnetModel(ESPnetASRModel):
         self._domain_set: frozenset = frozenset(t.lower() for t in self.domain_terms)
         self.domain_term_weight = domain_term_weight
         self.max_encoder_len_for_reward = max_encoder_len_for_reward
-        self.gemini_api_key = gemini_api_key or ""
-        self.mock_llm = mock_llm
         self.llm_reward_model = llm_reward_model
 
         # Local HuggingFace LLM for reward scoring (loaded on first use).
@@ -311,7 +295,7 @@ class RLESPnetModel(ESPnetASRModel):
             if not _HAS_TRANSFORMERS:
                 logging.warning(
                     "llm_reward_model=%s requested but 'transformers' is not "
-                    "installed. Falling back to Gemini / mock path.",
+                    "installed. Falling back to mock (mwer + noise) path.",
                     llm_reward_model,
                 )
             else:
@@ -337,7 +321,7 @@ class RLESPnetModel(ESPnetASRModel):
                 except Exception as exc:
                     logging.warning(
                         "Failed to load llm_reward_model=%s (%s). "
-                        "Falling back to Gemini / mock path.",
+                        "Falling back to mock (mwer + noise) path.",
                         llm_reward_model,
                         exc,
                     )
@@ -367,8 +351,6 @@ class RLESPnetModel(ESPnetASRModel):
         max_encoder_len_for_reward: Optional[int] = None,
         domain_terms: Optional[List[str]] = None,
         domain_term_weight: Optional[float] = None,
-        gemini_api_key: Optional[str] = None,
-        mock_llm: Optional[bool] = None,
         log_reward_samples: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
@@ -390,8 +372,6 @@ class RLESPnetModel(ESPnetASRModel):
             max_encoder_len_for_reward: Override instance value.
             domain_terms:             Override instance domain term list.
             domain_term_weight:       Override instance domain term weight.
-            gemini_api_key:           Override instance API key.
-            mock_llm:                 Override instance mock flag.
             log_reward_samples:       If True, log up to 10 (utt_id, ref, hyp,
                                       reward) sample tuples at INFO level.
                                       Injected by RLTrainer on dump steps.
@@ -414,8 +394,6 @@ class RLESPnetModel(ESPnetASRModel):
         )
         d_terms: List[str] = list(domain_terms) if domain_terms is not None else self.domain_terms
         d_weight = domain_term_weight if domain_term_weight is not None else self.domain_term_weight
-        api_key = gemini_api_key if gemini_api_key is not None else self.gemini_api_key
-        use_mock = mock_llm if mock_llm is not None else self.mock_llm
         domain_set = frozenset(t.lower() for t in d_terms)
 
         assert text_lengths.dim() == 1
@@ -480,8 +458,6 @@ class RLESPnetModel(ESPnetASRModel):
                     max_enc_len=max_enc_len,
                     domain_set=domain_set,
                     d_weight=d_weight,
-                    api_key=api_key,
-                    use_mock=use_mock,
                     log_reward_samples=log_reward_samples,
                     utt_ids=kwargs.get("utt_id", []),
                     stats=stats,
@@ -561,8 +537,6 @@ class RLESPnetModel(ESPnetASRModel):
         max_enc_len: int,
         domain_set: frozenset,
         d_weight: float,
-        api_key: str,
-        use_mock: bool,
         stats: dict,
         log_reward_samples: bool = False,
         utt_ids: Optional[List[str]] = None,
@@ -604,8 +578,6 @@ class RLESPnetModel(ESPnetASRModel):
                 reward_mode=reward_mode,
                 domain_set=domain_set,
                 d_weight=d_weight,
-                api_key=api_key,
-                use_mock=use_mock,
             )
             self._cached_reward = rewards.mean().detach().unsqueeze(0)
 
@@ -679,8 +651,6 @@ class RLESPnetModel(ESPnetASRModel):
         reward_mode: str,
         domain_set: frozenset,
         d_weight: float,
-        api_key: str,
-        use_mock: bool,
     ) -> torch.Tensor:
         """Route to the correct reward function based on ``reward_mode``."""
         if reward_mode == "mwer":
@@ -692,18 +662,14 @@ class RLESPnetModel(ESPnetASRModel):
             )
 
         if reward_mode == "llm":
-            return self._compute_llm_reward(
-                hypotheses, references, device, api_key, use_mock
-            )
+            return self._compute_llm_reward(hypotheses, references, device)
 
         if reward_mode == "all":
             r_mwer = _compute_mwer(hypotheses, references, device)
             r_wwer = _compute_wwer(
                 hypotheses, references, device, domain_set, d_weight
             )
-            r_llm = self._compute_llm_reward(
-                hypotheses, references, device, api_key, use_mock
-            )
+            r_llm = self._compute_llm_reward(hypotheses, references, device)
             return (r_mwer + r_wwer + r_llm) / 3.0
 
         logging.warning("Unknown reward_mode=%s; falling back to mwer.", reward_mode)
@@ -714,28 +680,22 @@ class RLESPnetModel(ESPnetASRModel):
         hypotheses: List[str],
         references: List[str],
         device: torch.device,
-        api_key: str,
-        use_mock: bool,
     ) -> torch.Tensor:
         """LLM quality score [0, 1] per utterance.
 
         Inference priority (first available wins):
         1. Local HuggingFace 4-bit model (``self._hf_llm``), when loaded.
-        2. Gemini-1.5-flash API (``api_key`` non-empty, ``use_mock=False``).
-        3. Mock path: mwer + Gaussian noise, clamped to [0, 1].
+        2. Mock path: mwer + Gaussian noise, clamped to [0, 1].
 
         The mock path activates when:
-        - ``use_mock=True`` (smoke-test mode)
-        - No local model and no Gemini key available
+        - ``self._hf_llm`` is None (transformers not installed, or model load failed)
         - Any inference call raises an exception
         """
         if not _HAS_JIWER:
             raise RuntimeError("jiwer required even for llm reward (mock fallback).")
 
         rewards: List[float] = []
-
-        can_use_hf = self._hf_llm is not None and not use_mock
-        can_use_gemini = _HAS_GENAI and bool(api_key) and not use_mock
+        can_use_hf = self._hf_llm is not None
 
         for hyp, ref in zip(hypotheses, references):
             if not ref.strip():
@@ -746,7 +706,7 @@ class RLESPnetModel(ESPnetASRModel):
             hyp_str = hyp if hyp.strip() else "<empty>"
 
             # --- Path 1: local HuggingFace model ---
-            if can_use_hf and score is None:
+            if can_use_hf:
                 try:
                     domain_hint = (
                         f"Domain context: {self._llm_domain_tag}. "
@@ -778,42 +738,17 @@ class RLESPnetModel(ESPnetASRModel):
                         out[0][inputs["input_ids"].shape[1]:],
                         skip_special_tokens=True,
                     ).strip()
-                    # Extract the first float-like token from the response
                     import re as _re
                     m = _re.search(r"[0-9]+(?:\.[0-9]+)?", generated)
                     if m:
                         score = max(0.0, min(1.0, float(m.group())))
                 except Exception as exc:
                     logging.warning(
-                        "Local HF LLM inference failed (%s); trying next path.", exc
+                        "Local HF LLM inference failed (%s); falling back to mock.", exc
                     )
                     score = None
 
-            # --- Path 2: Gemini API ---
-            if can_use_gemini and score is None:
-                try:
-                    _genai.configure(api_key=api_key)
-                    gemini_model = _genai.GenerativeModel("gemini-1.5-flash")
-                    prompt = (
-                        "You are evaluating an automatic speech recognition (ASR) hypothesis.\n"
-                        f'Reference: "{ref}"\n'
-                        f'Hypothesis: "{hyp_str}"\n'
-                        "Rate how closely the hypothesis matches the reference on a scale "
-                        "from 0.0 (completely wrong) to 1.0 (perfect match).\n"
-                        "Consider word accuracy, domain-specific term correctness, and "
-                        "overall meaning preservation.\n"
-                        "Reply with a single decimal number between 0.0 and 1.0 only."
-                    )
-                    response = gemini_model.generate_content(prompt)
-                    score = float(response.text.strip())
-                    score = max(0.0, min(1.0, score))
-                except Exception as exc:
-                    logging.warning(
-                        "Gemini API call failed (%s); using mock fallback.", exc
-                    )
-                    score = None
-
-            # --- Path 3: mock (mwer + Gaussian noise) ---
+            # --- Path 2: mock (mwer + Gaussian noise) ---
             if score is None:
                 try:
                     wer = _jiwer.wer(ref, hyp_str)
