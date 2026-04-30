@@ -58,6 +58,7 @@ bpe_train_text="data/afrispeech_train/text"
 # Experiment directories
 sft_expdir="exp/asr_sft"
 rl_expdir="exp/asr_rl"
+asr_stats_dir="exp/asr_stats_raw_bpe5000"
 
 # Config files
 sft_config="conf/train_asr_sft.yaml"
@@ -236,7 +237,7 @@ bpe_model = "data/token_list/bpe_unigram5000/bpe.model"
 sp = sentencepiece.SentencePieceProcessor()
 sp.Load(bpe_model)
 
-stats_dir = pathlib.Path("exp/asr_stats_raw_bpe5000")
+    stats_dir = pathlib.Path("${asr_stats_dir}")
 pairs = [
     ("train", "dump/raw/${train_set}/wav.scp", "data/${train_set}/text"),
     ("valid", "dump/raw/${valid_set}/wav.scp", "data/${valid_set}/text"),
@@ -310,8 +311,6 @@ import json; info = json.load(open('exp/pretrained/model_info.json'))
 print(info.get('bpemodel',''))
 ")
 
-    asr_stats_dir="exp/asr_stats_raw_bpe5000"
-
     mkdir -p "${sft_expdir}"
     # shellcheck disable=SC2086
     ${cuda_cmd} --gpu "${ngpu}" "${sft_expdir}/train.log" \
@@ -363,8 +362,6 @@ import json; info = json.load(open('exp/pretrained/model_info.json'))
 print(info.get('bpemodel',''))
 ")
 
-    asr_stats_dir="exp/asr_stats_raw_bpe5000"
-
     mkdir -p "${rl_expdir}"
     # shellcheck disable=SC2086
     ${cuda_cmd} --gpu "${ngpu}" "${rl_expdir}/train.log" \
@@ -408,8 +405,8 @@ import json; info = json.load(open('exp/pretrained/model_info.json'))
 print(info.get('token_list',''))
 ")
 
-    for model_tag in sft rl; do
-        expdir="exp/asr_${model_tag}"
+    for expdir in "${sft_expdir}" "${rl_expdir}"; do
+        model_tag=$(basename "${expdir}")
         ckpt="${expdir}/valid.loss.best.pth"
         [ -f "${ckpt}" ] || { log "Skipping ${model_tag}: checkpoint not found."; continue; }
 
@@ -464,8 +461,8 @@ PYEOF
             if [ -f "${hyp_text}" ] && [ -f "${ref_text}" ]; then
                 # For RL model on primary test set, compute bootstrap p-value vs SFT
                 baseline_arg=""
-                if [ "${model_tag}" = "rl" ] && [ "${test_set}" = "${test_sets%% *}" ]; then
-                    sft_hyp="exp/asr_sft/decode_${test_set}/logdir/output.1/1best_recog/text"
+                if [ "${expdir}" = "${rl_expdir}" ] && [ "${test_set}" = "${test_sets%% *}" ]; then
+                    sft_hyp="${sft_expdir}/decode_${test_set}/logdir/output.1/1best_recog/text"
                     [ -f "${sft_hyp}" ] && baseline_arg="--baseline_hyp_file ${sft_hyp}"
                 fi
 
