@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+# shellcheck source=tools/installers/download_with_retry.sh
+. "$(dirname "$0")"/download_with_retry.sh
 
 if [ $# != 0 ]; then
     echo "Usage: $0"
@@ -16,7 +17,7 @@ fi
 PRIMARY_URL="https://www-i6.informatik.rwth-aachen.de/web/Software/mwerSegmenter.tar.gz"
 BACKUP_URL="https://huggingface.co/espnet/ci_tools/resolve/main/mwerSegmenter.tar.gz"
 
-if ! wget --no-check-certificate --tries=3 -O mwerSegmenter.tar.gz "${PRIMARY_URL}"; then
+if ! download_with_retry "${PRIMARY_URL}" mwerSegmenter.tar.gz --no-check-certificate; then
     echo "Primary download failed, trying backup URL..."
     echo ""
     echo "=============================================================================="
@@ -36,7 +37,14 @@ if ! wget --no-check-certificate --tries=3 -O mwerSegmenter.tar.gz "${PRIMARY_UR
     echo "distribution or contact RWTH directly."
     echo "=============================================================================="
     echo ""
-    if ! wget --no-check-certificate --tries=3 -O mwerSegmenter.tar.gz "${BACKUP_URL}"; then
+    wget_args=()
+    if [ -n "${HF_TOKEN:-}" ]; then
+        wget_args+=("--header=Authorization: Bearer ${HF_TOKEN}")
+    else
+        echo "HF_TOKEN is not set, backup download may fail if the file has many downloads"
+    fi
+    if ! download_with_retry "${BACKUP_URL}" mwerSegmenter.tar.gz \
+            "${wget_args[@]}" --no-check-certificate; then
         echo "Both primary and backup downloads failed"
         exit 1
     fi

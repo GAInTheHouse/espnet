@@ -10,13 +10,7 @@ from pathlib import Path
 from typing import Iterator, Tuple
 
 import pyarrow as pa
-
-try:
-    from arkive.text.write_utils import _decompress_text_data
-except ImportError:
-    raise ImportError(
-        "arkive is not installed. Install at https://github.com/wanchichen/arkive"
-    )
+from omniio.text.read import text_read_local
 
 try:
     import duckdb
@@ -26,10 +20,10 @@ except ImportError:
     )
 
 
-class ArkiveTextReader:
-    """Dict-like lazy text reader using arkive parquets.
+class OmniIOTextReader:
+    """Dict-like lazy text reader using omniio parquets.
 
-    Reads compressed text data from arkive parquet files. Text is stored in
+    Reads compressed text data from omniio parquet files. Text is stored in
     binary format with compression and accessed via byte offsets.
 
     Args:
@@ -75,17 +69,11 @@ class ArkiveTextReader:
         idx = self.index[key]
         row = self.data.row(idx, named=True)
 
-        bin_path = row["path"]
-        start_offset = row["start_byte_offset"]
-        file_size = row["file_size_bytes"]
-
-        with open(bin_path, "rb") as f:
-            f.seek(start_offset)
-            data_bytes = f.read(file_size)
-
-        text = _decompress_text_data(data_bytes)
-
-        return text
+        return text_read_local(
+            row["path"],
+            row["start_byte_offset"],
+            row["file_size_bytes"],
+        ).text
 
     def __contains__(self, key: str) -> bool:
         """Check if ID exists in manifest."""

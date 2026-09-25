@@ -9,18 +9,8 @@ from typing import Iterator, Tuple
 
 import numpy as np
 import pyarrow as pa
-
-try:
-    import kaldiio
-except ImportError:
-    kaldiio = None
-
-try:
-    from arkive import audio_read
-except ImportError:
-    raise ImportError(
-        "arkive is not installed. Install at https://github.com/wanchichen/arkive"
-    )
+from omniio import kaldi as kaldi_io
+from omniio.interface import audio_read
 
 try:
     import duckdb
@@ -37,10 +27,10 @@ except ImportError:
     )
 
 
-class ArkiveAudioReader:
-    """Dict-like lazy audio reader using arkive parquets.
+class OmniIOAudioReader:
+    """Dict-like lazy audio reader using omniio parquets.
 
-    Reads audio data from arkive parquet files. Audio is accessed via byte
+    Reads audio data from omniio parquet files. Audio is accessed via byte
     offsets and time boundaries stored in the parquet metadata.
 
     Returns:
@@ -218,7 +208,7 @@ class LhotseAudioReader:
 
 
 class KaldiAudioReader:
-    """Dict-like lazy audio reader using Kaldi ark files via kaldiio.
+    """Dict-like lazy audio reader for Kaldi ark files.
 
     Reads audio data from Kaldi ark files using an index file. The index file
     should contain one entry per line in the format: "example_id ark_path:offset"
@@ -238,12 +228,6 @@ class KaldiAudioReader:
         index_path: str,
         valid_ids: list = None,
     ):
-        if kaldiio is None:
-            raise ImportError(
-                "kaldiio is not installed. "
-                "Please install it with: pip install kaldiio"
-            )
-
         self.index = {}
 
         valid_ids_set = set(valid_ids) if valid_ids is not None else None
@@ -281,7 +265,7 @@ class KaldiAudioReader:
             raise KeyError(f"Key '{key}' not found in index")
 
         ark_index = self.index[key]
-        sample_rate, audio = kaldiio.load_mat(ark_index)
+        sample_rate, audio = kaldi_io.load_mat(ark_index)
 
         # Ensure consistent shape [num_channels, num_samples]
         if audio.ndim == 1:

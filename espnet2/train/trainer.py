@@ -13,7 +13,12 @@ import numpy as np
 import torch
 import torch.nn
 import torch.optim
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast
+
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
 from typeguard import typechecked
 
 from espnet2.iterators.abs_iter_factory import AbsIterFactory
@@ -28,6 +33,7 @@ from espnet2.schedulers.abs_scheduler import (
 from espnet2.torch_utils.add_gradient_noise import add_gradient_noise
 from espnet2.torch_utils.device_funcs import to_device
 from espnet2.torch_utils.recursive_op import recursive_average
+from espnet2.torch_utils.safe_torch_load import safe_torch_load
 from espnet2.torch_utils.set_all_random_seed import set_all_random_seed
 from espnet2.train.abs_espnet_model import AbsESPnetModel
 from espnet2.train.distributed_utils import DistributedOption
@@ -142,10 +148,9 @@ class Trainer:
         ngpu: int = 0,
         strict: bool = True,
     ):
-        states = torch.load(
+        states = safe_torch_load(
             checkpoint,
             map_location=f"cuda:{torch.cuda.current_device()}" if ngpu > 0 else "cpu",
-            weights_only=False,
         )
         model.load_state_dict(states["model"], strict=strict)
         reporter.load_state_dict(states["reporter"])
@@ -618,7 +623,8 @@ class Trainer:
                 del _model
 
             with autocast(
-                scaler is not None,
+                "cuda",
+                enabled=scaler is not None,
                 **autocast_args,
             ):
                 with reporter.measure_time("forward_time"):
@@ -836,7 +842,8 @@ class Trainer:
                 continue
 
             with autocast(
-                options.use_amp,
+                "cuda",
+                enabled=options.use_amp,
                 **autocast_args,
             ):
                 retval = model(**batch)

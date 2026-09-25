@@ -2,10 +2,9 @@ import argparse
 import logging
 from typing import Dict, Optional, Tuple
 
-import editdistance
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from typeguard import typechecked
 
 from espnet2.asr.frontend.abs_frontend import AbsFrontend
@@ -218,6 +217,8 @@ class ESPnetUASRModel(AbsESPnetModel):
 
                 ref_ids = ref_ids[ref_ids != self.pad]
                 ref_ids_list = ref_ids.tolist()
+                import editdistance  # [asr] extra; training-time metric
+
                 num_errors = editdistance.eval(hyp_ids_nosil_list, ref_ids_list)
                 batch_num_errors += num_errors
 
@@ -397,7 +398,7 @@ class ESPnetUASRModel(AbsESPnetModel):
     def encode(
         self, speech: torch.Tensor, speech_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        with autocast(False):
+        with autocast("cuda", enabled=False):
             # 1. Extract feats
             feats, feats_lengths = self._extract_feats(speech, speech_lengths)
         padding_mask = make_pad_mask(feats_lengths).to(feats.device)

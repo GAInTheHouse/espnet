@@ -1,12 +1,12 @@
 """Tests for espnet2/speechlm/dataloader/multimodal_loader/audio_loader.py.
 
 All tests use pytest.importorskip — they skip in CI but run when
-real dependencies (arkive, duckdb, lhotse, kaldiio) are installed.
+real dependencies (omniio, duckdb, lhotse) are installed.
 """
 
 import pytest
 
-arkive = pytest.importorskip("arkive", reason="arkive not installed")
+omniio = pytest.importorskip("omniio", reason="omniio not installed")
 duckdb = pytest.importorskip("duckdb", reason="duckdb not installed")
 pa = pytest.importorskip("pyarrow", reason="pyarrow not installed")
 lhotse = pytest.importorskip("lhotse", reason="lhotse not installed")
@@ -17,8 +17,8 @@ lhotse = pytest.importorskip("lhotse", reason="lhotse not installed")
 
 class TestKaldiAudioReader:
     @pytest.fixture(autouse=True)
-    def _skip_without_kaldiio(self):
-        pytest.importorskip("kaldiio", reason="kaldiio not installed")
+    def _skip_without_omniio_kaldi(self):
+        pytest.importorskip("omniio.kaldi", reason="omniio not installed")
 
     def test_kaldi_init(self, tmp_path):
         from espnet2.speechlm.dataloader.multimodal_loader.audio_loader import (
@@ -79,9 +79,9 @@ class TestKaldiAudioReader:
         index_file.write_text("utt1 /fake/ark:0\n")
         reader = KaldiAudioReader(str(index_file))
 
-        # Mock kaldiio.load_mat to return (sample_rate, 1D_audio_array)
+        # Mock omniio.kaldi.load_mat to return (sample_rate, 1D_audio_array)
         mono_audio = np.zeros(16000, dtype=np.float32)
-        with patch("kaldiio.load_mat", return_value=(16000, mono_audio)):
+        with patch("omniio.kaldi.load_mat", return_value=(16000, mono_audio)):
             audio, sr = reader["utt1"]
         assert sr == 16000
         assert audio.shape == (1, 16000)  # [num_channels, num_samples]
@@ -137,15 +137,15 @@ class TestLhotseAudioReader:
         assert audio.shape == (1, 16000)  # mono → [1, N]
 
 
-# ---------- ArkiveAudioReader ----------
+# ---------- OmniIOAudioReader ----------
 
 
-class TestArkiveAudioReader:
-    def test_arkive_audio_smoke(self):
-        """Minimal smoke test — only runs with full arkive/duckdb/pyarrow stack."""
+class TestOmniIOAudioReader:
+    def test_omniio_audio_smoke(self):
+        """Minimal smoke test — only runs with full omniio/duckdb/pyarrow stack."""
         from espnet2.speechlm.dataloader.multimodal_loader.audio_loader import (
-            ArkiveAudioReader,
+            OmniIOAudioReader,
         )
 
         # Just verify the class is importable and callable
-        assert callable(ArkiveAudioReader)
+        assert callable(OmniIOAudioReader)

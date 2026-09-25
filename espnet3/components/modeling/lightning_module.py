@@ -25,6 +25,76 @@ from espnet3.utils.logging_utils import log_component, log_stage
 logger = logging.getLogger("lightning")
 
 
+def build_model_summary(model) -> Dict[str, object]:
+    """Build a static model summary for logs or publication metadata.
+
+    Args:
+        model: PyTorch model instance to summarize.
+
+    Returns:
+        Dictionary with model class, parameter counts, buffer counts, dtype
+        composition, formatted display strings, and ``repr(model)``.
+
+    Notes:
+        This helper only inspects the instantiated module. It does not run a
+        forward pass, so no example batch or shape inference is required.
+
+    Examples:
+        ```python
+        summary = build_model_summary(model)
+        print(summary["total_params_display"])
+        ```
+    """
+    params = list(model.parameters())
+    buffers = list(model.buffers())
+
+    total_params = sum(p.numel() for p in params)
+    trainable_params = sum(p.numel() for p in params if p.requires_grad)
+    non_trainable_params = total_params - trainable_params
+    size_bytes = sum(p.numel() * p.element_size() for p in params)
+    total_buffers = sum(buf.numel() for buf in buffers)
+    buffer_size_bytes = sum(buf.numel() * buf.element_size() for buf in buffers)
+    module_count = sum(1 for _ in model.modules())
+    leaf_module_count = sum(
+        1 for module in model.modules() if not any(module.children())
+    )
+
+    dtype_counts: Dict[str, int] = {}
+    for tensor in [*params, *buffers]:
+        dtype = str(tensor.dtype)
+        dtype_counts[dtype] = dtype_counts.get(dtype, 0) + tensor.numel()
+    dtype_items = sorted(dtype_counts.items(), key=lambda kv: kv[1], reverse=True)
+    dtype_desc = ", ".join(
+        f"{dtype}({count / total_params * 100:.1f}%)" if total_params else dtype
+        for dtype, count in dtype_items
+    )
+
+    return {
+        "class_name": type(model).__name__,
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "non_trainable_params": non_trainable_params,
+        "trainable_ratio": (
+            trainable_params / total_params * 100.0 if total_params else 0.0
+        ),
+        "size_bytes": size_bytes,
+        "total_buffers": total_buffers,
+        "buffer_size_bytes": buffer_size_bytes,
+        "module_count": module_count,
+        "leaf_module_count": leaf_module_count,
+        "dtype_desc": dtype_desc or "None",
+        "repr": repr(model),
+        "total_params_display": format_number(total_params),
+        "trainable_params_display": format_number(trainable_params),
+        "non_trainable_params_display": format_number(non_trainable_params),
+        "size_display": format_size(size_bytes),
+        "total_buffers_display": format_number(total_buffers),
+        "buffer_size_display": format_size(buffer_size_bytes),
+        "module_count_display": format_number(module_count),
+        "leaf_module_count_display": format_number(leaf_module_count),
+    }
+
+
 class ESPnetLightningModule(lightning.LightningModule):
     """ESPnet3 LightningModule wrapper for model training and data integration.
 
@@ -91,6 +161,7 @@ class ESPnetLightningModule(lightning.LightningModule):
         super().__init__()
         self.config = config
         self.model = model
+        self._freeze_parameters()
         data_organizer = instantiate(config.dataset)
 
         data_organizer.log_summary(logger)
@@ -133,6 +204,80 @@ class ESPnetLightningModule(lightning.LightningModule):
 
         # Named `optimizers` switches the module to the manual multi-optimizer path.
         self.automatic_optimization = getattr(self.config, "optimizers", None) is None
+
+    def _freeze_parameters(self) -> None:
+        """Apply ESPnet2-compatible ``model.freeze_param`` selectors.
+
+        Each selector matches an exact parameter name or a dot-delimited
+        parameter-name prefix within the wrapped model.  The selectors use
+        ``self.model.named_parameters()``, so they do not include Lightning's
+        outer ``model.`` prefix.
+        """
+        model_config = self.config.get("model", {})
+        freeze_params = model_config.get("freeze_param", [])
+        if not freeze_params:
+            return
+
+        named_parameters = list(self.model.named_parameters())
+        initially_trainable = {
+            name for name, parameter in named_parameters if parameter.requires_grad
+        }
+        frozen_names = set()
+
+        logger.info(
+            "Applying model.freeze_param selectors: %s",
+            ", ".join(freeze_params),
+        )
+        for selector in freeze_params:
+            matched = [
+                (name, parameter)
+                for name, parameter in named_parameters
+                if name.startswith(selector + ".") or name == selector
+            ]
+            if not matched:
+                logger.warning(
+                    "model.freeze_param selector %r did not match any model parameter.",
+                    selector,
+                )
+                continue
+
+            newly_frozen = [
+                (name, parameter)
+                for name, parameter in matched
+                if parameter.requires_grad
+            ]
+            for name, parameter in newly_frozen:
+                parameter.requires_grad = False
+                frozen_names.add(name)
+
+            logger.info(
+                "model.freeze_param selector %r matched %d parameters (%d values); "
+                "froze %d trainable parameters (%d values).",
+                selector,
+                len(matched),
+                sum(parameter.numel() for _, parameter in matched),
+                len(newly_frozen),
+                sum(parameter.numel() for _, parameter in newly_frozen),
+            )
+
+        frozen_values = sum(
+            parameter.numel()
+            for name, parameter in named_parameters
+            if name in frozen_names
+        )
+        remaining_trainable = sum(
+            parameter.numel()
+            for _, parameter in named_parameters
+            if parameter.requires_grad
+        )
+        logger.info(
+            "model.freeze_param froze %d of %d initially trainable parameters "
+            "(%d values); %d trainable values remain.",
+            len(frozen_names),
+            len(initially_trainable),
+            frozen_values,
+            remaining_trainable,
+        )
 
     def _sync2skip(self, flag_skip):
         """Synchronize a skip flag across all DDP workers.
@@ -700,18 +845,7 @@ class ESPnetLightningModule(lightning.LightningModule):
         """
         logger.log(logging.INFO, "Model:\n%r", model, stacklevel=2)
 
-        params = list(model.parameters())
-        total_params = sum(p.numel() for p in params)
-        trainable_params = sum(p.numel() for p in params if p.requires_grad)
-        size_bytes = sum(p.numel() * p.element_size() for p in params)
-
-        dtype_counts: dict[str, int] = {}
-        for p in params:
-            dtype_counts[str(p.dtype)] = dtype_counts.get(str(p.dtype), 0) + p.numel()
-        dtype_items = sorted(dtype_counts.items(), key=lambda kv: kv[1], reverse=True)
-        dtype_desc = ", ".join(
-            f"{k}({v / total_params * 100:.1f}%)" for k, v in dtype_items
-        )
+        summary = build_model_summary(model)
 
         logger.log(logging.INFO, "Model summary:", stacklevel=2)
         logger.log(
@@ -720,23 +854,48 @@ class ESPnetLightningModule(lightning.LightningModule):
         logger.log(
             logging.INFO,
             "    Total Number of model parameters: %s",
-            format_number(total_params),
+            summary["total_params_display"],
             stacklevel=2,
         )
         logger.log(
             logging.INFO,
             "    Trainable model parameters: %s (%.1f%%)",
-            format_number(trainable_params),
-            (trainable_params / total_params * 100.0) if total_params else 0.0,
+            summary["trainable_params_display"],
+            summary["trainable_ratio"],
+            stacklevel=2,
+        )
+        logger.log(
+            logging.INFO,
+            "    Non-trainable model parameters: %s",
+            summary["non_trainable_params_display"],
             stacklevel=2,
         )
         logger.log(
             logging.INFO,
             "    Model size: %s",
-            format_size(size_bytes),
+            summary["size_display"],
             stacklevel=2,
         )
-        logger.log(logging.INFO, "    DType composition: %s", dtype_desc, stacklevel=2)
+        logger.log(
+            logging.INFO,
+            "    Buffers: %s (%s)",
+            summary["total_buffers_display"],
+            summary["buffer_size_display"],
+            stacklevel=2,
+        )
+        logger.log(
+            logging.INFO,
+            "    Modules: %s total, %s leaf",
+            summary["module_count_display"],
+            summary["leaf_module_count_display"],
+            stacklevel=2,
+        )
+        logger.log(
+            logging.INFO,
+            "    DType composition: %s",
+            summary["dtype_desc"],
+            stacklevel=2,
+        )
 
         if optimizer is None and scheduler is None:
             return
@@ -1103,11 +1262,6 @@ class ESPnetLightningModule(lightning.LightningModule):
         )
 
         for mode in ["train", "valid"]:
-            if mode == "train":
-                dataset_config.preprocessor.train = True
-            else:
-                dataset_config.preprocessor.train = False
-
             collect_stats(
                 model_config=OmegaConf.to_container(self.config.model, resolve=True),
                 dataset_config=dataset_config,

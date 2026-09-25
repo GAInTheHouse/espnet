@@ -4,6 +4,10 @@ set -euo pipefail
 
 . tools/activate_python.sh
 
+# ci/install.sh no longer installs the doc extra: only this script needs it,
+# and it was otherwise installed in every one of the ~100 CI jobs.
+python3 -m pip install -e ".[doc]"
+
 clean_outputs() {
     rm -rf dist
     rm -rf espnet2_bin
@@ -86,6 +90,13 @@ echo "::endgroup::"
 echo "::group::generate package doc"
 python ./doc/members2rst.py --root espnet2 --dst ./doc/_gen/guide --exclude espnet2.bin
 python ./doc/members2rst.py --root espnetez --dst ./doc/_gen/guide
+echo "::endgroup::"
+
+# Two pages at one address make vuepress-plugin-search-pro throw
+# "SlimSearch: duplicate ID" after everything below has run, naming neither
+# page. Fail here instead, with both names.
+echo "::group::check page addresses"
+python3 ./ci/check_doc_pages.py
 echo "::endgroup::"
 
 # build markdown
