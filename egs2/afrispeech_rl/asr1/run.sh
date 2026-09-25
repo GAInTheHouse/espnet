@@ -227,7 +227,7 @@ bpe_model = "data/token_list/bpe_unigram5000/bpe.model"
 sp = sentencepiece.SentencePieceProcessor()
 sp.Load(bpe_model)
 
-    stats_dir = pathlib.Path("${asr_stats_dir}")
+stats_dir = pathlib.Path("${asr_stats_dir}")
 pairs = [
     ("train", "dump/raw/${train_set}/wav.scp", "data/${train_set}/text"),
     ("valid", "dump/raw/${valid_set}/wav.scp", "data/${valid_set}/text"),
@@ -473,20 +473,23 @@ PYEOF
     done
 
     log "=== Final results ==="
-    for f in exp/asr_*/decode_*/result.txt; do
-        [ -f "${f}" ] && echo "--- ${f} ---" && cat "${f}"
+    for f in "${sft_expdir}"/decode_*/result.txt "${rl_expdir}"/decode_*/result.txt; do
+        [ -f "${f}" ] || continue
+        echo "--- ${f} ---"
+        cat "${f}"
     done
 
     log "=== Extended metrics (NeMo-comparable) ==="
-    python3 - <<'PYEOF'
+    python3 - "${sft_expdir}" "${rl_expdir}" <<'PYEOF'
 import json, pathlib, sys
-files = sorted(pathlib.Path("exp").glob("asr_*/decode_*/extended_metrics.json"))
+files = []
+for expdir in sys.argv[1:]:
+    files.extend(sorted(pathlib.Path(expdir).glob("decode_*/extended_metrics.json")))
 if not files:
     print("No extended_metrics.json files found yet.")
     sys.exit(0)
 for f in files:
-    parts = str(f).split("/")
-    tag = f"{parts[1]}/{parts[2]}"
+    tag = f"{f.parent.parent.name}/{f.parent.name}"
     m = json.loads(f.read_text())
     print(f"\n{tag}")
     print(f"  WER:        {m['wer_pct']:.2f}%   CER: {m['cer_pct']:.2f}%")
