@@ -17,6 +17,7 @@ RL-specific arguments registered by ``RLTrainer.add_arguments()``:
     --domain_term_weight    float   Cost multiplier for domain terms (default 3.0).
     --gemini_api_key        str     Gemini API key for llm reward mode.
     --mock_llm              flag    Use mock LLM (mwer + noise) even if key is set.
+    --llm_reward_model      str     HuggingFace id for the local 4-bit reward LLM.
 """
 
 import sys

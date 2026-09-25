@@ -28,6 +28,7 @@ RL-specific CLI arguments (registered by RLTrainer.add_arguments):
     --domain_term_weight    float, default 3.0
     --gemini_api_key        str,   default None
     --mock_llm              flag,  default False
+    --llm_reward_model      str,   default ""
 """
 
 import espnet2.tasks.asr as _asr_module

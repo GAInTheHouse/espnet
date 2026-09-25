@@ -40,7 +40,8 @@ Reward modes (``reward_mode``)
 ------------------------------
 mwer   Standard WER-based reward:  reward = clip(1 - WER(ref, hyp), 0, 1).
 wwer   Domain-weighted WER:  domain terms incur ``domain_term_weight`` × normal cost.
-llm    Local HuggingFace 4-bit LLM quality score [0, 1]; mock fallback = mwer + N(0, 0.05).
+llm    Quality score [0, 1] from the local HuggingFace 4-bit LLM, else the
+       Gemini API, else mock fallback = mwer + N(0, 0.05).
 all    Element-wise mean of mwer, wwer, and llm reward tensors.
 
 GPU notes
@@ -60,7 +61,9 @@ GPU notes
 
 import contextlib
 import logging
+import os
 import random as _random
+import re as _re
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -262,8 +265,11 @@ class RLESPnetModel(ESPnetASRModel):
             (e.g. ``microsoft/MediPhi``, ``google/medgemma-4b-it``).  When
             non-empty this path takes priority over the Gemini API.  Requires
             ``transformers`` and ``bitsandbytes`` to be installed.  The model
-            is loaded once at construction time with 4-bit NF4 quantization so
-            it fits on a 16 GB T4 GPU.
+            is loaded on the first ``llm``-reward step with 4-bit NF4
+            quantization so it fits on a 16 GB T4 GPU alongside the ASR model,
+            and is deliberately kept out of ``state_dict`` and the optimizer.
+            Normally supplied per-step by ``RLTrainer`` from
+            ``--llm_reward_model`` rather than passed here.
         All other args are forwarded verbatim to ``ESPnetASRModel.__init__``.
     """
 
@@ -286,49 +292,23 @@ class RLESPnetModel(ESPnetASRModel):
         self.domain_term_weight = domain_term_weight
         self.max_encoder_len_for_reward = max_encoder_len_for_reward
         self.llm_reward_model = llm_reward_model
-
-        # Local HuggingFace LLM for reward scoring (loaded on first use).
-        # 4-bit NF4 quantization — fits ~3.8–4 B params on a 16 GB T4.
-        self._hf_tokenizer = None
-        self._hf_llm = None
-        if llm_reward_model:
-            if not _HAS_TRANSFORMERS:
-                logging.warning(
-                    "llm_reward_model=%s requested but 'transformers' is not "
-                    "installed. Falling back to mock (mwer + noise) path.",
-                    llm_reward_model,
-                )
-            else:
-                try:
-                    logging.info(
-                        "Loading local LLM reward model: %s (4-bit quantized)",
-                        llm_reward_model,
-                    )
-                    bnb_cfg = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_compute_dtype=torch.float16,
-                    )
-                    self._hf_tokenizer = AutoTokenizer.from_pretrained(
-                        llm_reward_model
-                    )
-                    self._hf_llm = AutoModelForCausalLM.from_pretrained(
-                        llm_reward_model,
-                        quantization_config=bnb_cfg,
-                        device_map="auto",
-                    )
-                    self._hf_llm.eval()
-                    logging.info("Local LLM reward model loaded: %s", llm_reward_model)
-                except Exception as exc:
-                    logging.warning(
-                        "Failed to load llm_reward_model=%s (%s). "
-                        "Falling back to mock (mwer + noise) path.",
-                        llm_reward_model,
-                        exc,
-                    )
-                    self._hf_tokenizer = None
-                    self._hf_llm = None
-
         self._llm_domain_tag: str = _derive_domain_tag(llm_reward_model)
+
+        # Reward-LLM runtime state.  Held inside a plain dict so that the
+        # scoring LLM is never registered as a submodule: it must stay out of
+        # state_dict(), out of model.parameters() (the optimizer would
+        # otherwise try to update frozen 4-bit weights), and out of DDP
+        # parameter synchronisation.  Populated lazily by _ensure_hf_llm() on
+        # the first llm-reward step, so SFT and non-llm reward modes never pay
+        # the load cost.
+        self._llm_runtime: dict = {
+            "id": None,
+            "tokenizer": None,
+            "model": None,
+            "failed": set(),
+            "gemini": None,
+            "gemini_failed": False,
+        }
 
         # Cached neutral reward (0.5), updated each time reward is computed.
         # Registered as a buffer so it moves with the model to the right device.
@@ -351,6 +331,9 @@ class RLESPnetModel(ESPnetASRModel):
         max_encoder_len_for_reward: Optional[int] = None,
         domain_terms: Optional[List[str]] = None,
         domain_term_weight: Optional[float] = None,
+        llm_reward_model: Optional[str] = None,
+        gemini_api_key: Optional[str] = None,
+        mock_llm: bool = False,
         log_reward_samples: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
@@ -372,6 +355,12 @@ class RLESPnetModel(ESPnetASRModel):
             max_encoder_len_for_reward: Override instance value.
             domain_terms:             Override instance domain term list.
             domain_term_weight:       Override instance domain term weight.
+            llm_reward_model:         Override instance ``llm_reward_model``
+                                      (HuggingFace id for the local 4-bit
+                                      reward LLM; loaded on first use).
+            gemini_api_key:           API key for the Gemini reward backend,
+                                      used only when no local model is loaded.
+            mock_llm:                 Force the mock reward path.
             log_reward_samples:       If True, log up to 10 (utt_id, ref, hyp,
                                       reward) sample tuples at INFO level.
                                       Injected by RLTrainer on dump steps.
@@ -395,6 +384,15 @@ class RLESPnetModel(ESPnetASRModel):
         d_terms: List[str] = list(domain_terms) if domain_terms is not None else self.domain_terms
         d_weight = domain_term_weight if domain_term_weight is not None else self.domain_term_weight
         domain_set = frozenset(t.lower() for t in d_terms)
+        llm_cfg = {
+            "model_id": (
+                llm_reward_model
+                if llm_reward_model is not None
+                else self.llm_reward_model
+            ),
+            "gemini_api_key": gemini_api_key or "",
+            "mock_llm": mock_llm,
+        }
 
         assert text_lengths.dim() == 1
         batch_size = speech.shape[0]
@@ -458,6 +456,7 @@ class RLESPnetModel(ESPnetASRModel):
                     max_enc_len=max_enc_len,
                     domain_set=domain_set,
                     d_weight=d_weight,
+                    llm_cfg=llm_cfg,
                     log_reward_samples=log_reward_samples,
                     utt_ids=kwargs.get("utt_id", []),
                     stats=stats,
@@ -538,6 +537,7 @@ class RLESPnetModel(ESPnetASRModel):
         domain_set: frozenset,
         d_weight: float,
         stats: dict,
+        llm_cfg: Optional[dict] = None,
         log_reward_samples: bool = False,
         utt_ids: Optional[List[str]] = None,
     ) -> torch.Tensor:
@@ -578,6 +578,7 @@ class RLESPnetModel(ESPnetASRModel):
                 reward_mode=reward_mode,
                 domain_set=domain_set,
                 d_weight=d_weight,
+                llm_cfg=llm_cfg,
             )
             self._cached_reward = rewards.mean().detach().unsqueeze(0)
 
@@ -651,6 +652,7 @@ class RLESPnetModel(ESPnetASRModel):
         reward_mode: str,
         domain_set: frozenset,
         d_weight: float,
+        llm_cfg: Optional[dict] = None,
     ) -> torch.Tensor:
         """Route to the correct reward function based on ``reward_mode``."""
         if reward_mode == "mwer":
@@ -662,40 +664,162 @@ class RLESPnetModel(ESPnetASRModel):
             )
 
         if reward_mode == "llm":
-            return self._compute_llm_reward(hypotheses, references, device)
+            return self._compute_llm_reward(hypotheses, references, device, llm_cfg)
 
         if reward_mode == "all":
             r_mwer = _compute_mwer(hypotheses, references, device)
             r_wwer = _compute_wwer(
                 hypotheses, references, device, domain_set, d_weight
             )
-            r_llm = self._compute_llm_reward(hypotheses, references, device)
+            r_llm = self._compute_llm_reward(
+                hypotheses, references, device, llm_cfg
+            )
             return (r_mwer + r_wwer + r_llm) / 3.0
 
         logging.warning("Unknown reward_mode=%s; falling back to mwer.", reward_mode)
         return _compute_mwer(hypotheses, references, device)
+
+    def _ensure_hf_llm(self, model_id: str):
+        """Load and cache the 4-bit reward LLM for ``model_id``.
+
+        Returns ``(tokenizer, model)``, or ``(None, None)`` when the model is
+        unavailable.  A model-id that fails to load is recorded so the load is
+        attempted only once rather than on every reward step.
+        """
+        rt = self._llm_runtime
+        if not model_id or model_id in rt["failed"]:
+            return None, None
+        if model_id == rt["id"]:
+            return rt["tokenizer"], rt["model"]
+
+        if not _HAS_TRANSFORMERS:
+            logging.warning(
+                "llm_reward_model=%s requested but 'transformers' is not "
+                "installed. Falling back to Gemini/mock reward path.",
+                model_id,
+            )
+            rt["failed"].add(model_id)
+            return None, None
+
+        try:
+            logging.info(
+                "Loading local LLM reward model: %s (4-bit NF4 quantized)", model_id
+            )
+            bnb_cfg = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                quantization_config=bnb_cfg,
+                device_map="auto",
+            )
+            model.eval()
+            model.requires_grad_(False)
+        except Exception as exc:
+            logging.warning(
+                "Failed to load llm_reward_model=%s (%s). "
+                "Falling back to Gemini/mock reward path.",
+                model_id,
+                exc,
+            )
+            rt["failed"].add(model_id)
+            return None, None
+
+        rt["id"] = model_id
+        rt["tokenizer"] = tokenizer
+        rt["model"] = model
+        self._llm_domain_tag = _derive_domain_tag(model_id)
+        logging.info(
+            "Local LLM reward model ready: %s (domain=%s)",
+            model_id,
+            self._llm_domain_tag,
+        )
+        return tokenizer, model
+
+    def _ensure_gemini(self, api_key: str):
+        """Return a cached Gemini client, or None when unavailable.
+
+        Used only when no local ``llm_reward_model`` is loaded.  The key comes
+        from ``--gemini_api_key`` or the ``GEMINI_API_KEY`` environment
+        variable.
+        """
+        rt = self._llm_runtime
+        api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        if not api_key or rt["gemini_failed"]:
+            return None
+        if rt["gemini"] is not None:
+            return rt["gemini"]
+
+        try:
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            rt["gemini"] = genai.GenerativeModel("gemini-1.5-flash")
+            logging.info("Gemini reward backend initialised (gemini-1.5-flash).")
+        except Exception as exc:
+            logging.warning(
+                "Gemini init failed (%s); falling back to mock reward path.", exc
+            )
+            rt["gemini_failed"] = True
+            return None
+        return rt["gemini"]
+
+    def _build_llm_prompt(self, ref: str, hyp: str) -> str:
+        """Domain-tagged scoring prompt shared by the local and Gemini paths."""
+        domain_hint = (
+            f"Domain context: {self._llm_domain_tag}. "
+            if self._llm_domain_tag != "general"
+            else ""
+        )
+        return (
+            f"{domain_hint}"
+            "You are evaluating an automatic speech recognition (ASR) hypothesis.\n"
+            f'Reference: "{ref}"\n'
+            f'Hypothesis: "{hyp}"\n'
+            "Rate how closely the hypothesis matches the reference on a scale "
+            "from 0.0 (completely wrong) to 1.0 (perfect match).\n"
+            "Consider word accuracy, domain-specific term correctness, and "
+            "overall meaning preservation.\n"
+            "Reply with a single decimal number between 0.0 and 1.0 only."
+        )
 
     def _compute_llm_reward(
         self,
         hypotheses: List[str],
         references: List[str],
         device: torch.device,
+        llm_cfg: Optional[dict] = None,
     ) -> torch.Tensor:
         """LLM quality score [0, 1] per utterance.
 
-        Inference priority (first available wins):
-        1. Local HuggingFace 4-bit model (``self._hf_llm``), when loaded.
-        2. Mock path: mwer + Gaussian noise, clamped to [0, 1].
+        Backend priority (first available wins):
+        1. Local HuggingFace 4-bit model, when ``llm_reward_model`` is set.
+        2. Gemini API, when a key is configured and no local model is loaded.
+        3. Mock path: mwer + Gaussian noise, clamped to [0, 1].
 
-        The mock path activates when:
-        - ``self._hf_llm`` is None (transformers not installed, or model load failed)
-        - Any inference call raises an exception
+        The mock path activates when ``mock_llm`` is set, when neither backend
+        is available, or when an individual inference call raises.
         """
         if not _HAS_JIWER:
             raise RuntimeError("jiwer required even for llm reward (mock fallback).")
 
+        cfg = llm_cfg or {}
+        mock_llm = bool(cfg.get("mock_llm", False))
+        model_id = cfg.get("model_id") or self.llm_reward_model
+
+        if mock_llm:
+            tokenizer, hf_llm, gemini = None, None, None
+        else:
+            tokenizer, hf_llm = self._ensure_hf_llm(model_id)
+            gemini = (
+                None
+                if hf_llm is not None
+                else self._ensure_gemini(cfg.get("gemini_api_key", ""))
+            )
+
         rewards: List[float] = []
-        can_use_hf = self._hf_llm is not None
 
         for hyp, ref in zip(hypotheses, references):
             if not ref.strip():
@@ -706,39 +830,23 @@ class RLESPnetModel(ESPnetASRModel):
             hyp_str = hyp if hyp.strip() else "<empty>"
 
             # --- Path 1: local HuggingFace model ---
-            if can_use_hf:
+            if hf_llm is not None:
                 try:
-                    domain_hint = (
-                        f"Domain context: {self._llm_domain_tag}. "
-                        if self._llm_domain_tag != "general"
-                        else ""
-                    )
-                    prompt = (
-                        f"{domain_hint}"
-                        "You are evaluating an automatic speech recognition (ASR) hypothesis.\n"
-                        f'Reference: "{ref}"\n'
-                        f'Hypothesis: "{hyp_str}"\n'
-                        "Rate how closely the hypothesis matches the reference on a scale "
-                        "from 0.0 (completely wrong) to 1.0 (perfect match).\n"
-                        "Consider word accuracy, domain-specific term correctness, and "
-                        "overall meaning preservation.\n"
-                        "Reply with a single decimal number between 0.0 and 1.0 only."
-                    )
-                    inputs = self._hf_tokenizer(
+                    prompt = self._build_llm_prompt(ref, hyp_str)
+                    inputs = tokenizer(
                         prompt, return_tensors="pt", truncation=True, max_length=512
-                    ).to(next(self._hf_llm.parameters()).device)
+                    ).to(next(hf_llm.parameters()).device)
                     with torch.no_grad():
-                        out = self._hf_llm.generate(
+                        out = hf_llm.generate(
                             **inputs,
                             max_new_tokens=8,
                             do_sample=False,
-                            pad_token_id=self._hf_tokenizer.eos_token_id,
+                            pad_token_id=tokenizer.eos_token_id,
                         )
-                    generated = self._hf_tokenizer.decode(
+                    generated = tokenizer.decode(
                         out[0][inputs["input_ids"].shape[1]:],
                         skip_special_tokens=True,
                     ).strip()
-                    import re as _re
                     m = _re.search(r"[0-9]+(?:\.[0-9]+)?", generated)
                     if m:
                         score = max(0.0, min(1.0, float(m.group())))
@@ -748,7 +856,20 @@ class RLESPnetModel(ESPnetASRModel):
                     )
                     score = None
 
-            # --- Path 2: mock (mwer + Gaussian noise) ---
+            # --- Path 2: Gemini API ---
+            elif gemini is not None:
+                try:
+                    resp = gemini.generate_content(self._build_llm_prompt(ref, hyp_str))
+                    m = _re.search(r"[0-9]+(?:\.[0-9]+)?", resp.text or "")
+                    if m:
+                        score = max(0.0, min(1.0, float(m.group())))
+                except Exception as exc:
+                    logging.warning(
+                        "Gemini inference failed (%s); falling back to mock.", exc
+                    )
+                    score = None
+
+            # --- Path 3: mock (mwer + Gaussian noise) ---
             if score is None:
                 try:
                     wer = _jiwer.wer(ref, hyp_str)

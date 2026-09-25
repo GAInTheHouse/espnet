@@ -21,7 +21,8 @@ reinforce (true REINFORCE policy gradient)::
 Reward modes (``--reward_mode``):
     mwer    WER-based reward via jiwer (default)
     wwer    Domain-weighted WER (uses --domain_terms / --domain_term_weight)
-    llm     Gemini-1.5-flash quality score; mock fallback = mwer + N(0,0.05)
+    llm     Quality score from the local 4-bit ``--llm_reward_model``, else the
+            Gemini API, else mock fallback = mwer + N(0,0.05)
     all     Element-wise mean of mwer, wwer, and llm
 
 GPU efficiency improvements vs. the original single-mode trainer:
@@ -148,6 +149,10 @@ class RLTrainerOptions(TrainerOptions):
     mock_llm: bool = False
     """Use mock LLM (mwer + Gaussian noise) even if ``gemini_api_key`` is set."""
 
+    llm_reward_model: str = ""
+    """HuggingFace model-id scoring rewards in ``llm`` mode, loaded locally
+    with 4-bit quantization.  Takes priority over ``gemini_api_key``."""
+
     reward_sample_dump_interval: int = 200
     """Log up to 10 sample (utt_id, ref, hyp, reward) tuples every N optimizer
     steps to the standard Python logger at INFO level.
@@ -264,6 +269,17 @@ class RLTrainer(Trainer):
             help="Force mock LLM path even when --gemini_api_key is provided.",
         )
         group.add_argument(
+            "--llm_reward_model",
+            type=str,
+            default="",
+            help=(
+                "HuggingFace model-id used to score rewards in llm mode "
+                "(e.g. microsoft/MediPhi, google/medgemma-4b-it). Loaded "
+                "locally with 4-bit NF4 quantization on first use and takes "
+                "priority over --gemini_api_key. Empty = Gemini/mock path."
+            ),
+        )
+        group.add_argument(
             "--reward_sample_dump_interval",
             type=int,
             default=200,
@@ -319,6 +335,7 @@ class RLTrainer(Trainer):
         domain_term_weight = options.domain_term_weight
         gemini_api_key = options.gemini_api_key or ""
         mock_llm = options.mock_llm
+        llm_reward_model = options.llm_reward_model or ""
         reward_sample_dump_interval = options.reward_sample_dump_interval
 
         if log_interval is None:
@@ -366,6 +383,7 @@ class RLTrainer(Trainer):
             batch["domain_term_weight"] = domain_term_weight
             batch["gemini_api_key"] = gemini_api_key
             batch["mock_llm"] = mock_llm
+            batch["llm_reward_model"] = llm_reward_model
             batch["log_reward_samples"] = log_reward_samples
 
             batch = to_device(batch, "cuda" if ngpu > 0 else "cpu")
